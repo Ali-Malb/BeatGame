@@ -1,0 +1,192 @@
+{
+  "acceleration": {
+    "t0100": 3.12,
+    "t100200": 4.06,
+    "t200300": 8.72,
+    "topUprightKmh": 298.1,
+    "topTuckKmh": 318.6,
+    "shifts": 5,
+    "gearAtTop": 6
+  },
+  "lean": {
+    "maxLeanDeg": 52,
+    "swingSec": 0.408,
+    "selfRightSec": 0.875
+  },
+  "engineSweep": [
+    {
+      "rpm": 1200,
+      "fireHz": 40,
+      "freqs": [
+        20,
+        40,
+        80,
+        120,
+        160,
+        200
+      ],
+      "gainSum": 2.464,
+      "topLpHz": 5184
+    },
+    {
+      "rpm": 3000,
+      "fireHz": 100,
+      "freqs": [
+        50,
+        100,
+        200,
+        300,
+        400,
+        500
+      ],
+      "gainSum": 2.422,
+      "topLpHz": 6061
+    },
+    {
+      "rpm": 5000,
+      "fireHz": 166.7,
+      "freqs": [
+        83.3,
+        166.7,
+        333.3,
+        500,
+        666.7,
+        833.3
+      ],
+      "gainSum": 2.084,
+      "topLpHz": 7034
+    },
+    {
+      "rpm": 7000,
+      "fireHz": 233.3,
+      "freqs": [
+        116.7,
+        233.3,
+        466.7,
+        700,
+        933.3,
+        1166.7
+      ],
+      "gainSum": 2.241,
+      "topLpHz": 8008
+    },
+    {
+      "rpm": 9000,
+      "fireHz": 300,
+      "freqs": [
+        150,
+        300,
+        600,
+        900,
+        1200,
+        1500
+      ],
+      "gainSum": 2.473,
+      "topLpHz": 8982
+    },
+    {
+      "rpm": 11000,
+      "fireHz": 366.7,
+      "freqs": [
+        183.3,
+        366.7,
+        733.3,
+        1100,
+        1466.7,
+        1833.3
+      ],
+      "gainSum": 2.792,
+      "topLpHz": 9955
+    },
+    {
+      "rpm": 13000,
+      "fireHz": 433.3,
+      "freqs": [
+        216.7,
+        433.3,
+        866.7,
+        1300,
+        1733.3,
+        2166.7
+      ],
+      "gainSum": 3.211,
+      "topLpHz": 10929
+    },
+    {
+      "rpm": 14500,
+      "fireHz": 483.3,
+      "freqs": [
+        241.7,
+        483.3,
+        966.7,
+        1450,
+        1933.3,
+        2416.7
+      ],
+      "gainSum": 3.597,
+      "topLpHz": 11659
+    },
+    {
+      "rpm": 15200,
+      "fireHz": 506.7,
+      "freqs": [
+        253.3,
+        506.7,
+        1013.3,
+        1520,
+        2026.7,
+        2533.3
+      ],
+      "gainSum": 3.8,
+      "topLpHz": 12000
+    }
+  ],
+  "weatherCut": {
+    "passed": true,
+    "before": {
+      "v": 28.235690321725198,
+      "rpm": 9787.274690278779,
+      "leanDeg": 0,
+      "s": 706.1705793963009,
+      "x": 5.25,
+      "gear": 4
+    },
+    "after": {
+      "v": 28.235690321725198,
+      "rpm": 9787.274690278779,
+      "leanDeg": 0,
+      "s": 706.1705793963009,
+      "x": 5.25,
+      "gear": 4
+    }
+  },
+  "corridor": {
+    "windows": 38,
+    "violations": 0,
+    "activeVehicles": 24,
+    "spawnFailSameLane": 228,
+    "spawnFailCorridor": 62,
+    "repairDespawns": 22,
+    "repairPushes": 0
+  },
+  "gateStats": {
+    "perfect": 0,
+    "good": 0,
+    "miss": 22,
+    "lastDelta": 0.7784,
+    "meanAbsDelta": 0
+  },
+  "rhythm": {
+    "audioTime": 102.35,
+    "beatPhase": 0.346,
+    "energy": 1,
+    "section": "golden"
+  },
+  "constants": {
+    "redline": 14500,
+    "limiter": 15200,
+    "shiftLight": 14200,
+    "shiftCutMs": 70,
+    "maxLeanDeg": 52
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "kmh": 126.2,
+  "gates": {
+    "perfect": 0,
+    "good": 0,
+    "miss": 3,
+    "lastDelta": 0.5080702947845808,
+    "deltas": []
+  },
+  "audioTime": 36.09,
+  "rhythm": "starry"
+}
