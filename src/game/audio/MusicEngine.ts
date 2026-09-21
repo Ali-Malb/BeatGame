@@ -123,13 +123,14 @@ export class MusicEngine {
     const data = this.noiseBuffer.getChannelData(0);
     for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
 
-    // align step grid with the DSP clock epoch
-    const epoch = ctx.currentTime - this.clock.getAudioTime();
-    this.nextStepDsp = epoch + Math.ceil((ctx.currentTime - epoch) / STEP_SEC + 0.5) * STEP_SEC;
-    // normalize so bar boundaries land on integer bar counts
-    this.stepCounter = Math.round((this.nextStepDsp - epoch) / STEP_SEC);
-    this.stepCounter -= this.stepCounter % STEPS_PER_BAR; // start on a bar
-    this.nextStepDsp = epoch + this.stepCounter * STEP_SEC;
+  // align step grid with the DSP clock epoch.
+  // The first scheduled step must be a NON-NEGATIVE bar boundary: negative step
+  // indices make `bar % 4` negative → CHORD_ROOTS[bar] undefined → NaN midi →
+  // a thrown AudioParam error that kills the pump every frame.
+  const epoch = ctx.currentTime - this.clock.getAudioTime();
+  const stepNow = Math.ceil(epoch === 0 ? 0 : this.clock.getAudioTime() / STEP_SEC);
+  this.stepCounter = Math.max(0, Math.ceil(stepNow / STEPS_PER_BAR) * STEPS_PER_BAR);
+  this.nextStepDsp = epoch + this.stepCounter * STEP_SEC;
   }
 
   setVolume(v: number): void {

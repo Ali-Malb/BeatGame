@@ -1,21 +1,28 @@
 /**
- * GameManager — state machine (menu / riding / crashing / paused).
+ * GameManager — the game.
  *
- * Timing architecture (§36):
- *   - RENDER: requestAnimationFrame, interpolates everything
+ * State machine (deterministic):
+ *   BOOT → MAIN_MENU → SEARCH → LOADING_AUDIO → ANALYZING → COUNTDOWN → PLAYING
+ *          → PAUSED | FAILED | VICTORY (→ COUNTDOWN on retry, → MAIN_MENU)
+ *
+ * Timing architecture:
+ *   - RENDER: requestAnimationFrame
  *   - PHYSICS: fixed 1/120 s accumulator with CCD substeps
- *   - MUSIC/RHYTHM/LYRICS/GATES: AudioDspClock (AudioContext.currentTime) —
- *     the authoritative timeline; stays locked even when FPS drops below 60
+ *   - MUSIC / GATES / JUDGMENTS / LYRICS / BIOMES: AudioDspClock
+ *     (AudioContext.currentTime) — the ONLY authoritative timeline.
  *
- * Beat-reactive world (§6): FOV +3° kick (0.12 s decay), 80 ms ×1.25 lighting
- * pulse, +300% embers in chorus/drop. Weather hard cuts ride the cue sheet.
- * Rhythm combo tracked separately from the near-miss score combo.
+ * Selected song flow: /api/stream (yt-dlp) → decodeAudioData → deterministic
+ * DSP analysis (AudioAnalyzer) → chart (RhythmChart) → lane gates
+ * (RhythmGates) reconciled against the audio clock every frame. A hard pause
+ * suspends the AudioContext itself, so playback and the rhythm timeline can
+ * never drift apart across a pause/resume.
  */
 
 import * as THREE from 'three';
 import { InputHandler } from './Input';
 import { Highway } from '../environment/Highway';
 import { WeatherController } from '../environment/Weather';
+import { BiomeController, BIOME_NAMES } from '../environment/Biomes';
 import { TrafficManager, NearMissEvent } from '../traffic/TrafficManager';
 import { BikeController } from '../vehicle/BikeController';
 import { MotorcycleAudio } from '../vehicle/BikeAudio';
@@ -23,77 +30,103 @@ import { DashboardDisplay } from '../vehicle/Dashboard';
 import { CameraController } from '../camera/CameraController';
 import { PostFX } from '../fx/PostFX';
 import { clamp, damp, kmh } from './utils';
+import { Scoring, multiplierForCombo } from './Scoring';
 
 import { AudioDspClock } from '../audio/AudioDspClock';
 import { MusicEngine } from '../audio/MusicEngine';
 import { AudioRhythm } from '../audio/AudioRhythm';
-import { parseCueSheet } from '../audio/CueSheetParser';
+import { BufferPlayer } from '../audio/BufferPlayer';
+import { SongLoader, SongLoadError, type LoadedSong } from '../audio/SongLoader';
+import { analyzeBuffer, energyAt, sectionAt, type Analysis, type AnalysisSection } from '../audio/AudioAnalyzer';
+import { buildChart, type RhythmChart } from '../rhythm/RhythmChart';
+import { RhythmGates, type GateEvent } from '../rhythm/RhythmGates';
+import { parseCueSheet, type ParsedCueSheet } from '../audio/CueSheetParser';
 import { buildCueSheet, LOOP_SEC } from '../audio/cueSheet';
 import {
-  parseYouTubeId,
-  fetchSongMeta,
-  splitTitle,
   fetchLyrics,
-  fetchSongTempo,
-  buildSongCueSheet,
+  splitTitle,
   type SongMetadata,
   type TimedLyrics,
 } from '../audio/SongResolver';
-import { YouTubeSongHost } from '../audio/YouTubeSongHost';
-import { RhythmGateSpawner } from '../rhythm/RhythmGateSpawner';
 import { KineticLyricManager, type LyricCue } from '../rhythm/KineticLyricManager';
-import { GameTestHarness } from './GameTestHarness';
 
-export type GameState = 'menu' | 'riding' | 'crashing' | 'paused';
+export type GameState =
+  | 'boot'
+  | 'menu'
+  | 'search'
+  | 'loading'
+  | 'analyzing'
+  | 'countdown'
+  | 'playing'
+  | 'paused'
+  | 'failed'
+  | 'victory';
 
-/** song identity readout (§33 debug — telemetry carries it to React) */
-export interface SongInfo {
-  mode: 'demo' | 'song';
-  title: string;
-  artist: string;
+export interface SongSelection {
+  source: 'youtube' | 'upload' | 'demo';
   videoId: string;
-  duration: number;
+  title: string;
+  channel: string;
+}
+
+export interface Telemetry {
+  state: GameState;
+  speedKmh: number;
+  rpm: number;
+  gear: number;
+  gearLabel: string;
+  leanDeg: number;
+  score: number;
+  combo: number;
+  multiplier: number;
+  hp: number;
+  hpFlash: boolean;
+  perfects: number;
+  goods: number;
+  misses: number;
+  crashes: number;
+  bestCombo: number;
+  accuracy: number;
+  musicTime: number;
+  songDuration: number;
   bpm: number;
-  bpmCalibrated: boolean;
-  bpmSource: 'auto-catalog' | 'manual-tap' | 'unresolved';
-  lyricSource: string;
-  currentLyric: string;
-  audioTime: number;
+  section: string;
+  biome: string;
+  fps: number;
+  cameraMode: string;
+  gamepad: boolean;
+  countdown: number | null;
+  song: SongSelection;
+  analysisQuality: string;
+  debug: {
+    audioTime: number;
+    beatPhase: number;
+    subdivision: number;
+    playerS: number;
+    laneX: number;
+    activeGates: number;
+    nextGateTime: number;
+    gateDelta: number;
+    distanceKm: number;
+    nearMisses: number;
+  };
 }
 
 export interface GameCallbacks {
-  onTelemetry?: (t: {
-    speedKmh: number;
-    rpm: number;
-    gear: number;
-    gearLabel: string;
-    leanDeg: number;
-    wheelieDeg: number;
-    score: number;
-    combo: number;
-    rhythmCombo: number;
-    gatePerfects: number;
-    distanceKm: number;
-    topSpeedKmh: number;
-    nearMisses: number;
-    state: GameState;
-    weather: string;
-    section: string;
-    musicTime: number;
-    fps: number;
-    cameraMode: string;
-    gamepad: boolean;
-    song: SongInfo;
-  }) => void;
+  onTelemetry?: (t: Telemetry) => void;
   onPopup?: (text: string, points: number, kind: string) => void;
-  onCrash?: () => void;
-  onRespawn?: () => void;
   onStateChange?: (s: GameState) => void;
-  /** DOM container for the DSP-driven kinetic lyrics (upper third) */
+  onProgress?: (p: { phase: string; fraction: number; detail: string }) => void;
+  onAnalysis?: (a: { bpm: number; duration: number; sections: number; quality: string; notes: number }) => void;
   getLyricContainer?: () => HTMLElement | null;
 }
 
-const PHYSICS_H = 1 / 120; // fixed physics timestep
+const PHYSICS_H = 1 / 120;
+/** 3-2-1-GO: 2 bars @128 BPM — the demo synth's bar grid lands exactly on song t=0 */
+const COUNTDOWN_SEC = 3.75;
+
+/** section-kind → biome order for song mode (cycled per section) */
+const SECTION_BIOME_CYCLE: Array<0 | 1 | 2 | 3> = [0, 2, 1, 3];
 
 export class GameManager {
   private renderer: THREE.WebGLRenderer;
@@ -101,6 +134,7 @@ export class GameManager {
   private input = new InputHandler();
   private highway: Highway;
   private weather: WeatherController;
+  private biomes: BiomeController;
   private traffic: TrafficManager;
   private bike: BikeController;
   private audio = new MotorcycleAudio();
@@ -108,70 +142,66 @@ export class GameManager {
   private cam: CameraController;
   private postfx: PostFX;
 
-  // ---- music/rhythm stack (DSP-authoritative) ----
+  // ---- audio/rhythm stack ----
   private dspClock = new AudioDspClock();
   private music = new MusicEngine(this.dspClock);
   private rhythm: AudioRhythm | null = null;
-  private musicStarted = false;
-  private lyricContainer: HTMLElement | null = null;
+  private bufferPlayer: BufferPlayer | null = null;
+  private loader: SongLoader | null = null;
+  private analysis: Analysis | null = null;
+  private chart: RhythmChart | null = null;
+  private gates: RhythmGates;
+  private scoring = new Scoring();
   private lyrics: KineticLyricManager | null = null;
-  private gates: RhythmGateSpawner;
+  private lyricContainer: HTMLElement | null = null;
 
-  // ---- selected-song session (§6/§7: YouTube song drives EVERYTHING) ----
-  private songMode = false;
-  private songHost: YouTubeSongHost | null = null;
+  // ---- session (selected song identity) ----
+  private sessionToken = 0;
+  private loadedSong: LoadedSong | null = null;
   private songMeta: SongMetadata | null = null;
   private songLyrics: TimedLyrics | null = null;
-  private songBpm = 0; // 0 = not yet calibrated — rhythm disabled until T taps
-  private songFirstBeat = 0;
-  private songTaps: number[] = [];
-  private songTempoLockedByUser = false;
-  /** increments on every new run so stale async metadata cannot mutate a new session */
-  private songSessionToken = 0;
-  private songMusicVolume = 0.6;
-  private songMusicOn = true;
+  private selection: SongSelection = {
+    source: 'demo',
+    videoId: '',
+    title: 'MIDNIGHT RUNNER — C1 Inner Loop',
+    channel: 'built-in synthwave',
+  };
+  private nearMissCount = 0;
 
-  state: GameState = 'menu';
+  state: GameState = 'boot';
+  /** recent state transitions (debug/smoke-test aid) */
+  readonly stateLog: Array<{ t: number; from: string; to: string }> = [];
 
-  // scoring
-  private score = 0;
-  private combo = 1;
-  private comboTimer = 0;
-  private rhythmCombo = 0; // §33: separate from normal score combo
-  private bestRhythmCombo = 0;
-  private nearMisses = 0;
-  private topSpeed = 0;
-  private bestCombo = 1;
-
-  // crash/respawn
-  private crashTimer = 0;
-  private respawnPending = false;
+  // crash / fail choreography
+  private failTimer = 0;
+  private crashingOut = false;
 
   // loop
   private rafId = 0;
   private lastT = 0;
+  private lastAudioT = 0; // DSP-clock sim-time baseline
   private time = 0;
   private fps = 60;
   private telemetryTimer = 0;
   private running = false;
   private physicsAccum = 0;
 
-  // weather cue tracking (hard cuts)
+  private appliedBiome = -1;
   private appliedPreset = -1;
+  private lastSectionIndex = -1;
+  private menuBiomeTimer = 0;
 
-  // adaptive quality (downgrades only)
   private qualityTier = 2;
   private lowFpsTimer = 0;
 
   private tmpVel = new THREE.Vector3();
   private tmpFwd = new THREE.Vector3(0, 0, 1);
-  /** authored demo lyric cues (rebuild source when a song session ends) */
   private demoLyricCues: LyricCue[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private callbacks: GameCallbacks = {}) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: false, // MSAA handled by composer target
+      antialias: false,
       powerPreference: 'high-performance',
       stencil: false,
     });
@@ -184,405 +214,451 @@ export class GameManager {
 
     this.highway = new Highway(this.scene);
     this.weather = new WeatherController(this.renderer, this.scene, this.highway.mats);
+    this.biomes = new BiomeController(this.scene, this.highway, this.weather);
+    this.biomes.buildPools();
     this.traffic = new TrafficManager(this.highway, this.scene);
     this.bike = new BikeController(this.highway, this.scene);
     this.cam = new CameraController(this.scene, window.innerWidth / Math.max(1, window.innerHeight));
     this.cam.attachMirrors(this.bike);
     this.weather.setRainLayer(this.cam.camera);
-
     this.postfx = new PostFX(this.renderer, this.scene, this.cam.camera, window.innerWidth, window.innerHeight);
 
-    // diegetic dashboard texture onto the bike's cluster plane
     const dashMat = new THREE.MeshBasicMaterial({ map: this.dashboard.texture });
     this.bike.joints.dashboard.material = dashMat;
 
-    // rhythm systems (need the scene; music clock starts on user gesture)
-    const sheet = parseCueSheet(buildCueSheet());
-    this.rhythm = new AudioRhythm(sheet, this.dspClock);
-    this.gates = new RhythmGateSpawner(this.scene, this.highway, this.rhythm);
-    // demo lyric cues kept for lyric rebuilds (song swap-in overwrites)
-    this.demoLyricCues = sheet.getCuesOfType('lyric').map((c) => ({
-      time: c.time,
-      text: c.text ?? '',
-      stagger: true, // authored demo color-tag cues (explicit DEMO mode §12)
-    }));
+    // lane rhythm gates
+    this.gates = new RhythmGates(this.scene, this.highway);
 
-    // kinetic lyrics attach to a DOM container supplied by React
+    // traffic ↔ game wiring (+ gate de-confliction §28)
+    this.traffic.onNearMiss = (e) => this.handleNearMiss(e);
+    this.traffic.onCollision = () => this.handleImpact();
+    this.traffic.gateGuard = (lane, s, playerS, playerV) => this.gateZoneFree(lane, s, playerS, playerV);
+
     this.lyricContainer = callbacks.getLyricContainer?.() ?? null;
     if (this.lyricContainer) {
       this.lyrics = new KineticLyricManager(this.lyricContainer);
-      this.lyrics.build(this.demoLyricCues);
       this.lyrics.onWordHighlight = () => this.postfx.bloomPulse(0.35);
     }
 
-    // traffic ↔ scoring wiring
-    this.traffic.onNearMiss = (e) => this.handleNearMiss(e);
-    this.traffic.onCollision = () => this.triggerCrash();
+    // demo rhythm sheet (synth track) — also drives menu attract world
+    this.attachDemoRhythm();
 
     window.addEventListener('resize', this.onResize);
     document.addEventListener('visibilitychange', this.onVisibility);
 
-    // initial world population
     this.traffic.reset(this.bike.s);
     this.weather.setPreset(0, true);
+    this.appliedPreset = 0;
+    this.biomes.setBiome(2, true); // sakura twilight menu backdrop
+    this.appliedBiome = 2;
 
-    // debug handle (dev only) — includes the acceptance harness (§37)
     if (process.env.NODE_ENV === 'development') {
       (window as unknown as { __game: GameManager }).__game = this;
-      (window as unknown as { __gameTest: GameTestHarness }).__gameTest = new GameTestHarness(this);
+    }
+    this.setState('menu');
+    this.startAttract();
+  }
+
+  // ------------------------------------------------------------------ prep ----
+  private attachDemoRhythm(): void {
+    const sheet = parseCueSheet(buildCueSheet());
+    this.rhythm = new AudioRhythm(sheet, this.dspClock);
+    this.demoLyricCues = sheet.getCuesOfType('lyric').map((c) => ({
+      time: c.time,
+      text: c.text ?? '',
+      stagger: true,
+    }));
+    this.lyrics?.build(this.demoLyricCues);
+    this.chart = null;
+    this.gates.setChart(null, this.dspClock.getAudioTime());
+    this.analysis = null;
+  }
+
+  /** fabricate a deterministic Analysis from the authored demo cue sheet so the
+   *  SAME chart pipeline (quantize → lanes) powers the demo track. */
+  private demoAnalysis(): Analysis {
+    const sheet = parseCueSheet(buildCueSheet());
+    const beatSec = 60 / 128;
+    const duration = LOOP_SEC;
+    const onsets: Analysis['onsets'] = [];
+    const sectionEnergy = (t: number) => {
+      const bar = Math.floor(t / (beatSec * 4));
+      const secs = [
+        { start: 0, e: 0.3 },
+        { start: 16, e: 0.62 },
+        { start: 44, e: 1.0 },
+        { start: 68, e: 0.92 },
+        { start: 88, e: 0.3 },
+      ];
+      let e = 0.3;
+      for (let i = 0; i < secs.length; i++) {
+        if (bar >= secs[i].start) e = secs[i].e;
+      }
+      return e;
+    };
+    for (let bar = 0; bar < 88; bar++) {
+      const barT = bar * beatSec * 4;
+      const e = sectionEnergy(barT);
+      for (let q = 0; q < 8; q++) {
+        const t = barT + q * (beatSec / 2);
+        if (q % 2 === 0) {
+          onsets.push({ time: t, strength: (q === 0 ? 1.0 : 0.65) * (0.4 + e), band: 'bass' });
+        } else if (e > 0.55) {
+          onsets.push({ time: t, strength: 0.5 * e, band: 'mid' });
+        }
+      }
+    }
+    onsets.sort((a, b) => a.time - b.time);
+    const energy = new Float32Array(Math.ceil(duration / 0.1));
+    for (let i = 0; i < energy.length; i++) energy[i] = sectionEnergy(i * 0.1);
+    const sections: AnalysisSection[] = [
+      { start: 0, end: 30, energy: 0.3, kind: 'intro' },
+      { start: 30, end: 82.5, energy: 0.62, kind: 'verse' },
+      { start: 82.5, end: 126, energy: 1.0, kind: 'drop' },
+      { start: 126, end: 165, energy: 0.92, kind: 'chorus' },
+    ];
+    return {
+      duration,
+      sampleRate: 44100,
+      bpm: 128,
+      firstBeat: 0,
+      beatSec,
+      onsets,
+      energy,
+      energyDt: 0.1,
+      sections,
+      quality: 'ok',
+    };
+  }
+
+  /** MAIN_MENU → search overlay (pure UI state; world keeps attract mode) */
+  openSearch(): void {
+    if (this.state === 'menu') this.setState('search');
+  }
+  closeSearch(): void {
+    if (this.state === 'search') this.setState('menu');
+  }
+
+  /** quick start: built-in synthwave demo track */
+  async startDemo(): Promise<void> {
+    this.sessionToken++;
+    this.clearSongSession();
+    this.selection = { source: 'demo', videoId: '', title: 'MIDNIGHT RUNNER — C1 Inner Loop', channel: 'built-in synthwave' };
+    this.analysis = this.demoAnalysis();
+    this.chart = buildChart(this.analysis);
+    this.emitAnalysis(this.chart);
+    this.gates.setChart(this.chart, 0);
+    await this.unlockAudio();
+    if (!this.musicStarted) {
+      this.dspClock.attach(this.audio.context!);
+      this.musicStarted = true;
+    }
+    this.beginCountdown();
+  }
+
+  /** search result picked → load + decode + analyze → countdown */
+  async startYouTube(videoId: string): Promise<void> {
+    const token = ++this.sessionToken;
+    this.clearSongSession();
+    this.selection = { source: 'youtube', videoId, title: 'Loading…', channel: '' };
+    this.setState('loading');
+    await this.unlockAudio();
+    const ctx = this.audio.context;
+    if (!ctx) {
+      this.failPrep('Audio context unavailable — click the page and retry.');
+      return;
+    }
+    this.loader = new SongLoader(ctx);
+    let song: LoadedSong;
+    try {
+      song = await this.loader.loadYouTube(videoId, (p) => {
+        if (token !== this.sessionToken) return;
+        this.callbacks.onProgress?.({
+          phase: p.phase,
+          fraction: p.fraction,
+          detail: p.phase === 'fetch' ? `streaming ${(p.received / 1048576).toFixed(1)} MB` : 'decoding audio…',
+        });
+      });
+    } catch (e) {
+      if (token !== this.sessionToken) return;
+      const msg = e instanceof SongLoadError ? e.message : 'unknown load error';
+      this.failPrep(`Song load failed — ${msg}`);
+      return;
+    }
+    if (token !== this.sessionToken) return;
+    this.loadedSong = song;
+    this.selection.title = song.title || `YouTube · ${videoId}`;
+    this.selection.channel = song.channel;
+
+    await this.analyzeAndChart(song, token);
+  }
+
+  /** uploaded file picked → decode + analyze → countdown */
+  async startUpload(file: File): Promise<void> {
+    const token = ++this.sessionToken;
+    this.clearSongSession();
+    this.selection = { source: 'upload', videoId: '', title: file.name, channel: 'local upload' };
+    this.setState('loading');
+    await this.unlockAudio();
+    const ctx = this.audio.context;
+    if (!ctx) {
+      this.failPrep('Audio context unavailable — click the page and retry.');
+      return;
+    }
+    this.loader = new SongLoader(ctx);
+    try {
+      const song = await this.loader.loadUpload(file, (p) => {
+        if (token !== this.sessionToken) return;
+        this.callbacks.onProgress?.({
+          phase: p.phase,
+          fraction: p.fraction,
+          detail: p.phase === 'fetch' ? `reading ${(p.received / 1048576).toFixed(1)} MB` : 'decoding audio…',
+        });
+      });
+      if (token !== this.sessionToken) return;
+      this.loadedSong = song;
+      this.selection.title = song.title;
+      await this.analyzeAndChart(song, token);
+    } catch (e) {
+      if (token !== this.sessionToken) return;
+      const msg = e instanceof SongLoadError ? e.message : 'unknown load error';
+      this.failPrep(`Upload failed — ${msg}`);
     }
   }
 
-  // ------------------------------------------------------------------ public ----
-  /** start options: demo soundtrack (default) or a selected YouTube song */
-  async start(opts?: { songUrl?: string }): Promise<void> {
-    // A new launch is always a fresh soundtrack session. Dispose the previous
-    // YouTube host and clear all song-specific state before resolving the new one.
-    // This prevents stale metadata/lyrics from leaking across runs.
-    this.clearSongSession();
-    // user gesture: unlock audio, start the music, begin the run
+  /** decode → deterministic analysis → chart → lyric fetch → countdown */
+  private async analyzeAndChart(song: LoadedSong, token: number): Promise<void> {
+    this.setState('analyzing');
+    this.callbacks.onProgress?.({ phase: 'analyze', fraction: 0.35, detail: 'analyzing beats & onsets…' });
+    // yield a frame so the overlay paints before the (heavy, synchronous) FFT
+    await new Promise((r) => setTimeout(r, 30));
+    if (token !== this.sessionToken) return;
+
+    const analysis = analyzeBuffer(song.buffer);
+    if (token !== this.sessionToken) return;
+    this.analysis = analysis;
+    this.chart = buildChart(analysis);
+    this.gates.setChart(this.chart, 0);
+    this.emitAnalysis(this.chart);
+
+    // song metadata + synced lyrics (never invented — resolved or unavailable)
+    const meta: SongMetadata = {
+      videoId: song.videoId,
+      title: song.title,
+      channel: song.channel,
+      artist: '',
+      track: song.title,
+      duration: song.duration,
+      durationResolved: true,
+    };
+    const parts = splitTitle(song.title, song.channel);
+    meta.artist = parts.artist;
+    meta.track = parts.track;
+    this.songMeta = meta;
+    void this.resolveLyrics(token);
+
+    this.callbacks.onProgress?.({ phase: 'analyze', fraction: 1, detail: 'ready' });
+    this.beginCountdown();
+  }
+
+  private emitAnalysis(chart: RhythmChart): void {
+    this.callbacks.onAnalysis?.({
+      bpm: chart.bpm,
+      duration: chart.duration,
+      sections: chart.sections.length,
+      quality: this.analysis?.quality ?? 'ok',
+      notes: chart.notes.length,
+    });
+  }
+
+  private async resolveLyrics(token: number): Promise<void> {
+    const meta = this.songMeta;
+    if (!meta) return;
+    const resolved = await fetchLyrics(meta);
+    if (token !== this.sessionToken) return;
+    this.songLyrics = resolved;
+    if (resolved.source === 'unavailable') {
+      this.lyrics?.build([]);
+    } else {
+      const cues: LyricCue[] = resolved.lines.map((l) => ({
+        time: l.start,
+        end: l.end,
+        text: l.text,
+        words: l.words ? l.words.map((w) => ({ start: w.start, text: w.text })) : undefined,
+        stagger: false,
+      }));
+      this.lyrics?.build(cues);
+    }
+  }
+
+  private failPrep(message: string): void {
+    this.callbacks.onPopup?.(message, 0, 'songError');
+    this.setState('menu');
+  }
+
+  private musicStarted = false;
+
+  private async unlockAudio(): Promise<void> {
     this.audio.start();
     this.audio.resume();
-    if (!this.musicStarted && this.audio.context && this.rhythm) {
+    if (this.audio.context) {
       this.dspClock.attach(this.audio.context);
-      this.dspClock.start();
-      this.musicStarted = true;
-      this.gates.reset(this.dspClock.getAudioTime());
-    }
-
-    // ---- selected-song mode (§7): the YouTube song IS the session identity ----
-    const videoId = opts?.songUrl ? parseYouTubeId(opts.songUrl) : null;
-    if (opts?.songUrl && !videoId) {
-      this.callbacks.onPopup?.('INVALID YOUTUBE URL', 0, 'songError');
-    }
-    if (videoId && this.audio.context) {
-      const sessionToken = this.songSessionToken;
-      this.songMode = true;
-      this.songBpm = 0;
-      this.songTaps = [];
-      this.songTempoLockedByUser = false;
-      this.songLyrics = null;
-      this.songMeta = await fetchSongMeta(videoId);
-      this.rhythm!.songEnergyFn = null;
-      // provisional sheet: lyric-less + rhythm-less until player + taps resolve
-      this.swapSongSheet();
-      this.lyrics?.build([]); // clear demo lyrics immediately (§12)
-      try {
-        const host = new YouTubeSongHost(this.dspClock);
-        this.songHost = host;
-        host.cb = {
-          onReady: (playerTitle, playerDuration) => {
-            if (this.songSessionToken !== sessionToken || this.songHost !== host || !this.songMode) return;
-            // PLAYER-REPORTED identity is authoritative (§9)
-            const data = host.getVideoData();
-            const title = playerTitle || data.title || this.songMeta?.title || '';
-            const meta = this.songMeta;
-            if (meta && playerDuration > 0) {
-              meta.duration = playerDuration;
-              meta.durationResolved = true;
-            }
-            if (meta && title) {
-              meta.title = title;
-              const channel = data.author || meta.channel;
-              const parts = splitTitle(title, channel);
-              meta.artist = parts.artist;
-              meta.track = parts.track;
-            }
-
-            this.callbacks.onPopup?.(`SONG · ${title || 'loading…'}`, 0, 'songInfo');
-            // Resolve catalog tempo + exact-song lyrics independently. Both
-            // operations are guarded against stale async results and session IDs.
-            void this.resolveSongTempo();
-            void this.resolveSongLyrics();
-          },
-          onError: (code) => {
-            if (this.songSessionToken !== sessionToken || this.songHost !== host || !this.songMode) return;
-            this.callbacks.onPopup?.('SONG UNPLAYABLE · CHECK VIDEO', 0, 'songError');
-            void code;
-          },
-        };
-        await host.attach(this.audio.context, videoId);
-        this.dspClock.setEpochTo(0);
-      } catch {
-        host.dispose();
-        this.songMode = false;
-        this.songHost = null;
-        this.callbacks.onPopup?.('SONG LOAD FAILED · DEMO TRACK', 0, 'songError');
-        this.lyrics?.build(this.demoLyricCues);
+      if (!this.bufferPlayer) {
+        this.bufferPlayer = new BufferPlayer(this.dspClock);
+        this.bufferPlayer.onEnded = () => this.onSongEnded();
       }
+      this.bufferPlayer.attach(this.audio.context, this.audio.context.destination, this.songVolume);
+      if (!this.loader) this.loader = new SongLoader(this.audio.context);
     }
+  }
 
-    if (this.songMode && this.songHost == null) this.songMode = false;
-    if (!this.songMode) {
-      // demo/generated soundtrack mode (fallback, §12)
-      if (this.audio.context) this.music.start(this.audio.context, this.audio.context.destination);
-      this.lyrics?.build(this.demoLyricCues);
-    } else {
-      // the synth track stays OFF in song mode — no fake BPM, no demo lyrics
-      this.music.setEnabled(false);
-      this.weather.autoCycle = true; // sky still evolves across the run
-      this.songHost?.setVolume(this.songMusicOn ? this.songMusicVolume : 0);
-    }
+  private songVolume = 0.9;
+
+  // ------------------------------------------------------------ countdown ----
+  private beginCountdown(): void {
+    this.audio.context?.resume(); // restart/retry from pause: clock must run again
+    // reset run + world
     this.resetRun();
-    this.setState('riding');
+    this.setState('countdown');
     if (!this.running) {
       this.running = true;
       this.lastT = performance.now();
       this.rafId = requestAnimationFrame(this.loop);
     }
+    const ctx = this.audio.context;
+    if (!ctx) return;
+    // epoch anchored so the timeline reads −COUNTDOWN_SEC now; music starts at t=0
+    if (this.selection.source === 'demo') {
+      this.dspClock.setEpochTo(-COUNTDOWN_SEC);
+      if (!this.musicStarted) {
+        this.dspClock.attach(ctx);
+        this.musicStarted = true;
+      }
+      if (!this.demoMusicOn) {
+        // aligns the synth's step grid to the (already re-anchored) clock:
+        // bars land exactly on song t=0 because the countdown is 2 whole bars
+        this.music.start(ctx, ctx.destination);
+        this.demoMusicOn = true;
+      }
+      this.music.setVolume(this.musicEnabled ? this.songVolume : 0);
+      this.music.setEnabled(this.musicEnabled);
+      this.music.setPaused(false);
+    } else if (this.loadedSong && this.bufferPlayer) {
+      this.bufferPlayer.load(this.loadedSong.buffer);
+      this.bufferPlayer.setVolume(this.musicEnabled ? this.songVolume : 0);
+      // song t=0 lands exactly when the countdown expires (DSP-anchored)
+      this.bufferPlayer.playScheduled(COUNTDOWN_SEC - 0.12);
+    }
+    this.gates.reset(this.dspClock.getAudioTime());
+    this.lastAudioT = this.dspClock.getAudioTime(); // sim-time baseline for the run
   }
 
+  private startPlaybackAtZero(): void {
+    // safety net: if the demo synth was never started during the countdown,
+    // start it now (grid offset ≤ half a beat — still beat-aligned)
+    if (this.selection.source === 'demo' && !this.demoMusicOn && this.audio.context) {
+      this.music.start(this.audio.context, this.audio.context.destination);
+      this.demoMusicOn = true;
+      this.music.setVolume(this.musicEnabled ? this.songVolume : 0);
+      this.music.setEnabled(this.musicEnabled);
+    }
+  }
+  private demoMusicOn = false;
+  private musicEnabled = true;
+
+  // ------------------------------------------------------------- run reset ----
+  private resetRun(): void {
+    this.bike.respawn(60, 2);
+    this.traffic.reset(this.bike.s);
+    this.scoring.reset();
+    this.nearMissCount = 0;
+    this.crashingOut = false;
+    this.failTimer = 0;
+    this.physicsAccum = 0;
+    this.appliedBiome = -1;
+    this.appliedPreset = -1;
+    this.lastSectionIndex = -1;
+    this.postfx.setFade(0);
+    this.postfx.flash(0.25, new THREE.Color(0.2, 0.2, 0.3));
+  }
+
+  // ------------------------------------------------------------ song session ----
   private clearSongSession(): void {
-    this.songSessionToken++;
-    this.songHost?.dispose();
-    this.songHost = null;
-    this.songMode = false;
+    this.bufferPlayer?.pause();
+    this.loadedSong = null;
     this.songMeta = null;
     this.songLyrics = null;
-    this.songBpm = 0;
-    this.songFirstBeat = 0;
-    this.songTaps = [];
-    this.songTempoLockedByUser = false;
-
-    // Restore the authored demo rhythm as well as the demo lyrics. A previous
-    // song session may have replaced this.rhythm with a zero-BPM/provisional
-    // song sheet; leaving that object alive would silently disable rhythm on
-    // the next demo launch.
-    const sheet = parseCueSheet(buildCueSheet());
-    const r = new AudioRhythm(sheet, this.dspClock);
-    this.rhythm = r;
-    this.gates.attachRhythm(r, this.dspClock.getAudioTime());
-    this.lyrics?.build(this.demoLyricCues);
+    this.analysis = null;
+    this.chart = null;
     this.music.setEnabled(true);
-  }
-
-  /** Resolve an external catalog BPM for the exact selected song. */
-  private async resolveSongTempo(): Promise<void> {
-    const meta = this.songMeta;
-    const sessionToken = this.songSessionToken;
-    if (!meta || this.songTempoLockedByUser) return;
-    const bpm = await fetchSongTempo(meta);
-    if (!this.songMode || this.songMeta !== meta || this.songSessionToken !== sessionToken || this.songTempoLockedByUser || bpm == null) return;
-    this.songBpm = +bpm.toFixed(1);
-    // BPM metadata gives us the grid spacing. Beat phase is deliberately kept
-    // at zero until the player taps T/Select, because a catalog BPM does not
-    // prove where beat 1 falls in a particular YouTube upload.
-    this.songFirstBeat = 0;
-    this.swapSongSheet();
-    this.callbacks.onPopup?.(`BPM ${this.songBpm} · AUTO · TAP T TO PHASE-LOCK`, 0, 'songInfo');
-  }
-
-  /** resolve lyrics + rebuild lyric display for THE selected song (§8) */
-  private async resolveSongLyrics(): Promise<void> {
-    const meta = this.songMeta;
-    const sessionToken = this.songSessionToken;
-    if (!meta) return;
-    const resolved = await fetchLyrics(meta);
-    if (!this.songMode || this.songMeta !== meta || this.songSessionToken !== sessionToken) return;
-    this.songLyrics = resolved;
-    // Plain lyrics without source-authored timestamps stay unavailable.
-    // Never reconstruct a timeline from duration alone: that would create
-    // plausible-looking but musically false synchronization.
-    this.rebuildSongLyricDisplay();
-    this.swapSongSheet();
-    if (this.songLyrics.source === 'unavailable') {
-      this.callbacks.onPopup?.('LYRICS UNAVAILABLE', 0, 'songInfo');
-    } else {
-      this.callbacks.onPopup?.(
-        this.songLyrics.source === 'lrclib-synced-word' ? 'LYRICS · SYNCED (WORD)' : 'LYRICS · SYNCED',
-        0,
-        'songInfo'
-      );
+    if (this.selection.source === 'demo' || this.state === 'menu' || this.state === 'search') {
+      this.attachDemoRhythm();
     }
   }
 
-  /** feed resolved TimedLyrics into the KineticLyricManager (real timestamps) */
-  private rebuildSongLyricDisplay(): void {
-    const ly = this.songLyrics;
-    if (!ly || ly.source === 'unavailable' || !this.lyrics) {
-      this.lyrics?.build([]); // LYRICS UNAVAILABLE — no fake text (§8)
-      return;
-    }
-    const cues: LyricCue[] = ly.lines.map((l) => ({
-      time: l.start,
-      end: l.end,
-      text: l.text,
-      words: l.words ? l.words.map((w) => ({ start: w.start, text: w.text })) : undefined,
-      stagger: false,
-    }));
-    this.lyrics.build(cues);
-  }
-
-  /**
-   * (Re)build the ACTIVE rhythm sheet from the selected song (§13/§14):
-   * lyric cues = resolved timestamps, beats/gates = calibrated BPM + phase.
-   * bpm == 0 → no beat cues; gates stay disabled until calibration.
-   */
-  private swapSongSheet(): void {
-    if (!this.songMode || !this.songMeta || !this.rhythm) return;
-    const meta = this.songMeta;
-    const duration = meta.durationResolved ? meta.duration : 480;
-    const energy = (t: number) => {
-      // visual-reactivity curve over the song's own timeline (estimated; not
-      // claimed metadata) — intro <45 s, outro last 30 s
-      if (t < Math.min(45, duration * 0.1)) return 0.45;
-      if (t > duration - 30) return 0.75;
-      return 0.8;
-    };
-    const json = buildSongCueSheet(meta, this.songLyrics, this.songBpm, this.songFirstBeat, energy);
-    const sheet = parseCueSheet(json as Parameters<typeof parseCueSheet>[0]);
-    const r = new AudioRhythm(sheet, this.dspClock);
-    r.songEnergyFn = energy;
-    this.rhythm = r;
-    this.gates.attachRhythm(r, this.dspClock.getAudioTime());
-  }
-
-  /**
-   * Tap-tempo calibration (§13): the player taps T / Select along to the beat
-   * of the SELECTED song; BPM + phase are fitted from the taps and the whole
-   * rhythm system (beats, gates, FOV kicks) re-derives from the SONG at that
-   * BPM. No hardcoded BPM is ever assumed.
-   */
-  private handleTapTempo(): void {
-    if (!this.songMode || !this.rhythm || !this.musicStarted) return;
-    const t = this.rhythm.getCurrentAudioTime();
-    if (t < 0) return;
-    this.songTaps.push(t);
-    if (this.songTaps.length > 12) this.songTaps.shift();
-    if (this.songTaps.length < 4) return;
-
-    const intervals: number[] = [];
-    for (let i = 1; i < this.songTaps.length; i++) {
-      const d = this.songTaps[i] - this.songTaps[i - 1];
-      if (d > 0.12 && d < 2.5) intervals.push(d); // plausible beat gaps
-    }
-    if (intervals.length < 2) return;
-    intervals.sort((a, b) => a - b);
-    let median = intervals[Math.floor(intervals.length / 2)];
-    // drop outliers (> 1.6× the median), recompute
-    const kept = intervals.filter((d) => d < median * 1.6 && d > median / 1.6);
-    median = kept.length >= 2 ? kept.reduce((a, b) => a + b, 0) / kept.length : median;
-    let bpm = 60 / median;
-    // snap into a sane musical range
-    while (bpm < 65) bpm *= 2;
-    while (bpm > 200) bpm /= 2;
-    this.songTempoLockedByUser = true;
-    this.songBpm = +bpm.toFixed(1);
-    this.songFirstBeat = this.songTaps[this.songTaps.length - 1] % (60 / this.songBpm);
-    this.swapSongSheet();
-    this.callbacks.onPopup?.(`BPM ${this.songBpm} · MANUAL RHYTHM LOCKED`, 0, 'songInfo');
-  }
-
-  /** song identity readout for telemetry (§33) */
-  songInfo(): SongInfo {
-    const meta = this.songMeta;
-    const t = this.rhythm && this.musicStarted ? this.rhythm.getCurrentAudioTime() : -1;
-    let currentLyric = '';
-    if (this.songMode && meta) {
-      const ly = this.songLyrics;
-      if (ly && ly.source !== 'unavailable' && t >= 0) {
-        for (const line of ly.lines) {
-          if (t >= line.start && t < (line.end ?? line.start + 6)) {
-            currentLyric = line.text;
-            break;
-          }
-        }
-      } else if (t >= 0) {
-        currentLyric = '—'; // resolved: no line active right now (instrumental)
-      }
-    } else {
-      // demo mode: current authored lyric from the sheet
-      const cues = this.demoLyricCues;
-      if (t >= 0) {
-        for (const c of cues) {
-          if (t >= c.time && t < c.time + 6.5) {
-            currentLyric = c.text.replace(/<[^>]*>/g, '');
-            break;
-          }
-        }
-      }
-    }
-    return {
-      mode: this.songMode ? 'song' : 'demo',
-      title: meta?.title ?? 'MIDNIGHT RUNNER — C1 Inner Loop',
-      artist: meta?.artist ?? '',
-      videoId: meta?.videoId ?? '',
-      duration: meta?.duration ?? LOOP_SEC,
-      bpm: this.songMode ? this.songBpm : (this.rhythm?.bpm ?? 128),
-      bpmCalibrated: !this.songMode || this.songBpm > 0,
-      bpmSource: !this.songMode ? 'auto-catalog' : this.songBpm > 0 ? (this.songTempoLockedByUser ? 'manual-tap' : 'auto-catalog') : 'unresolved',
-      lyricSource: this.songMode ? (this.songLyrics?.source ?? 'resolving…') : 'authored-demo',
-      currentLyric,
-      audioTime: +Math.max(0, t).toFixed(2),
-    };
-  }
-
-  /** true once the start pipeline finished (React await) */
-  get isSongMode(): boolean {
-    return this.songMode;
-  }
-
+  // --------------------------------------------------------------- public ----
   /** attract mode: render world behind the menu (auto cruise, no scoring) */
-  startAttract() {
+  startAttract(): void {
     if (this.running) return;
     this.running = true;
     this.lastT = performance.now();
     this.rafId = requestAnimationFrame(this.loop);
   }
 
-  togglePause() {
-    if (this.state === 'riding') {
+  togglePause(): void {
+    if (this.state === 'playing') {
       this.setState('paused');
-      this.audio.suspend();
-      this.music.setPaused(true);
-      this.songHost?.pause();
+      this.audio.context?.suspend(); // freezes the DSP clock + every source
     } else if (this.state === 'paused') {
-      this.setState('riding');
-      this.audio.resume();
-      this.music.setPaused(false);
-      this.songHost?.play();
-      // re-anchor the DSP timeline to the song's own playback clock
-      this.songHost?.reanchorClock();
+      this.setState('playing');
+      this.audio.context?.resume();
     }
+    // note: pause is intentionally unavailable during countdown — the scheduled
+    // song start + epoch are aligned to the countdown; resuming mid-countdown
+    // would need a re-schedule. Countdown is 3.3 s.
   }
 
-  setWeather(index: number) {
-    this.weather.setPreset(index, true); // manual = hard cut
-    this.appliedPreset = index;
-    this.weather.autoCycle = false;
+  setCamera(): void {
+    this.cam.toggle();
   }
 
-  setAutoCycle(on: boolean) {
-    this.weather.autoCycle = on;
-  }
-
-  setVolume(v: number) {
+  setMusicVolume(v: number): void {
+    this.songVolume = v;
+    if (this.selection.source === 'demo') {
+      this.music.setVolume(v);
+    } else {
+      this.bufferPlayer?.setVolume(this.musicEnabled ? v : 0);
+    }
     this.audio.setVolume(v);
   }
 
-  setMusicVolume(v: number) {
-    if (this.songMode) {
-      this.songMusicVolume = v;
-      this.songHost?.setVolume(this.songMusicOn ? v : 0);
-    } else {
-      this.music.setVolume(v);
+  setMusicEnabled(on: boolean): void {
+    this.musicEnabled = on;
+    if (this.selection.source === 'demo') this.music.setEnabled(on);
+    else this.bufferPlayer?.setVolume(on ? this.songVolume : 0);
+  }
+
+  retry(): void {
+    if (this.state === 'failed' || this.state === 'victory') this.beginCountdown();
+  }
+
+  /** R key: restart the current run from the countdown (any active state) */
+  restart(): void {
+    if (this.state === 'playing' || this.state === 'paused' || this.state === 'failed' || this.state === 'victory') {
+      this.beginCountdown();
     }
   }
 
-  setMusicEnabled(on: boolean) {
-    if (this.songMode) {
-      this.songMusicOn = on;
-      this.songHost?.setVolume(on ? this.songMusicVolume : 0);
-    } else {
-      this.music.setEnabled(on);
-    }
-  }
-
-  restart() {
-    if (this.songMode && this.songHost?.isReady) this.songHost.restart();
+  backToMenu(): void {
+    this.sessionToken++;
+    this.bufferPlayer?.pause();
+    this.setState('menu');
     this.resetRun();
-    this.setState('riding');
-    if (this.rhythm) this.rhythm.update();
+    this.traffic.reset(this.bike.s);
+  }
+
+  get currentSelection(): SongSelection {
+    return this.selection;
   }
 
   getState(): GameState {
@@ -591,43 +667,39 @@ export class GameManager {
 
   // ------------------------------------------------------------------ private ----
   private setState(s: GameState) {
+    if (s !== this.state) {
+      this.stateLog.push({ t: this.time, from: this.state, to: s });
+      if (this.stateLog.length > 24) this.stateLog.shift();
+    }
     this.state = s;
     this.callbacks.onStateChange?.(s);
   }
 
-  private resetRun() {
-    this.bike.respawn(60, 2);
-    this.traffic.reset(this.bike.s);
-    this.score = 0;
-    this.combo = 1;
-    this.comboTimer = 0;
-    this.rhythmCombo = 0;
-    this.bestRhythmCombo = 0;
-    this.nearMisses = 0;
-    this.topSpeed = 0;
-    this.bestCombo = 1;
-    this.crashTimer = 0;
-    this.respawnPending = false;
-    this.physicsAccum = 0;
-    this.postfx.setFade(0);
-    this.postfx.flash(0.25, new THREE.Color(0.2, 0.2, 0.3));
-    if (this.musicStarted) {
-      this.gates.reset(this.dspClock.getAudioTime());
+  /** §28: is (lane, s) clear of an upcoming gate's target lane/time window? */
+  private gateZoneFree(lane: number, s: number, playerS: number, playerV: number): boolean {
+    const chart = this.chart;
+    if (!chart || playerV < 1) return true;
+    const lead = (s - playerS) / Math.max(8, playerV);
+    const window = 1.5; // ±1.5 s of a gate's intended crossing time
+    // notes are sorted; binary-search-ish scan near the candidate time
+    const tNow = this.dspClock.getAudioTime();
+    const tCand = tNow + lead;
+    for (const n of chart.notes) {
+      if (n.time < tCand - window) continue;
+      if (n.time > tCand + window) break;
+      if (n.lane === lane) return false;
     }
+    return true;
   }
 
   private handleNearMiss(e: NearMissEvent) {
-    if (this.state !== 'riding') return;
-    this.combo = Math.min(10, this.combo + 0.5);
-    this.comboTimer = 4;
-    const pts = Math.round(e.points * this.combo);
-    this.score += pts;
-    this.nearMisses++;
-    this.bestCombo = Math.max(this.bestCombo, this.combo);
+    if (this.state !== 'playing') return;
+    this.nearMissCount++;
+    const pts = Math.round(e.points * this.scoring.multiplier);
+    this.scoring.score += pts;
     const label = e.kind === 'laneSplit' ? 'LANE SPLIT' : e.kind === 'close' ? 'CLOSE CALL' : 'NEAR MISS';
     this.callbacks.onPopup?.(label, pts, e.kind);
     this.audio.whoosh(e.side, e.heavy, e.strong ? 1 : 0.5);
-    // strong near-miss (≤0.8 m @ >180 km/h): punchy feedback (§32)
     this.cam.addTrauma(e.strong ? 0.32 : 0.1);
     if (e.strong) {
       this.postfx.bloomPulse(0.25);
@@ -635,73 +707,73 @@ export class GameManager {
     }
   }
 
-  private handleGateEvents(dt: number) {
-    if (!this.gates || this.state !== 'riding') return;
-    const events = this.gates.update(dt, this.bike.s, this.bike.v);
+  /** civilian collision: damage + speed cut + 1.2 s invulnerability (§19) */
+  private handleImpact(): void {
+    if (this.state !== 'playing') return;
+    const damaged = this.scoring.applyCrash(0.4);
+    if (!damaged) return; // invulnerable — ignore repeat hits
+    this.bike.model.v *= 0.4; // speed × 0.40
+    this.audio.crash();
+    this.cam.addTrauma(1.0);
+    this.postfx.flash(0.7, new THREE.Color(1.0, 0.15, 0.08));
+    this.postfx.chromaBurst(0.8);
+    this.callbacks.onPopup?.('CRASH −25 HP', 0, 'crash');
+    if (this.scoring.dead) this.enterFailed();
+  }
+
+  private handleGateEvents(events: GateEvent[]): void {
     for (const ev of events) {
-      if (ev.kind === 'perfect') {
-        this.rhythmCombo++;
-        this.bestRhythmCombo = Math.max(this.bestRhythmCombo, this.rhythmCombo);
-        const pts = 250;
-        this.score += pts;
+      if (ev.judgment === 'perfect') {
+        this.scoring.addJudgment('perfect');
         this.audio.gatePing(true);
-        this.songHost?.duck(0.35, 0.5); // music dips so the ping cuts through (§26)
+        if (this.selection.source === 'demo') (this.music as unknown as { duck?: (a: number, s: number) => void }).duck?.(0.3, 0.4);
+        else this.bufferPlayer?.duck(0.3, 0.4);
         this.postfx.bloomPulse(0.55);
         this.postfx.flash(0.16, new THREE.Color(0.5, 0.8, 1.2));
-        this.cam.addFovKick(3.5, 0.14);
+        this.cam.addFovKick(3, 0.12);
         this.cam.addTrauma(0.14);
         this.callbacks.onPopup?.(
-          this.rhythmCombo > 1 ? `PERFECT SYNC · COMBO x${this.rhythmCombo}` : 'PERFECT SYNC',
-          pts,
-          'gatePerfect'
+          this.scoring.combo > 1 ? `PERFECT +${1000}` : 'PERFECT',
+          Math.round(1000 * this.scoring.multiplier),
+          'gatePerfect',
         );
-      } else if (ev.kind === 'good') {
-        this.score += 100;
+      } else if (ev.judgment === 'good') {
+        this.scoring.addJudgment('good');
         this.audio.gatePing(false);
         this.postfx.bloomPulse(0.2);
-        this.callbacks.onPopup?.('GOOD SYNC', 100, 'gateGood');
+        this.callbacks.onPopup?.('GOOD', Math.round(500 * this.scoring.multiplier), 'gateGood');
       } else {
-        // miss breaks the rhythm combo
-        if (this.rhythmCombo > 3) {
-          this.callbacks.onPopup?.('COMBO LOST', 0, 'gateMiss');
-        }
-        this.rhythmCombo = 0;
+        this.scoring.addJudgment('miss');
+        this.callbacks.onPopup?.('MISS −4 HP', 0, 'gateMiss');
+        this.cam.addTrauma(0.18);
+      }
+      if (this.scoring.dead) this.enterFailed();
+    }
+  }
+
+  private enterFailed(): void {
+    if (this.state !== 'playing' && this.state !== 'countdown') return;
+    this.crashingOut = true;
+    this.failTimer = 0;
+    this.bike.crash();
+    this.setState('failed');
+    this.audio.context?.resume(); // ensure audio graph runs for the crash sfx
+  }
+
+  private onSongEnded(): void {
+    if (this.state === 'playing' || this.state === 'countdown') {
+      if (this.scoring.hp > 0) {
+        this.setState('victory');
+      } else {
+        this.enterFailed();
       }
     }
   }
 
-  private triggerCrash() {
-    if (this.state !== 'riding') return;
-    this.bike.crash();
-    this.setState('crashing');
-    this.crashTimer = 0;
-    this.combo = 1;
-    this.comboTimer = 0;
-    this.rhythmCombo = 0;
-    this.audio.crash();
-    this.cam.addTrauma(1.3);
-    this.postfx.flash(0.85, new THREE.Color(1.0, 0.15, 0.08));
-    this.postfx.chromaBurst(1.0); // red chromatic aberration (§34)
-    this.callbacks.onCrash?.();
-  }
-
-  private updateRespawn(dt: number) {
-    this.crashTimer += dt;
-    // black-out at the end of the wipeout
-    if (this.crashTimer > 1.0 && !this.respawnPending) {
-      this.respawnPending = true;
-      this.postfx.setFade(1);
-    }
-    if (this.crashTimer >= 1.55) {
-      // find clear lane ahead and reposition ≥50 m behind nearest traffic
-      const lane = this.traffic.findClearLane(this.bike.s + 90);
-      this.traffic.clearCorridor(this.bike.s + 90, lane, 80);
-      this.bike.respawn(this.bike.s + 90, lane);
-      this.physicsAccum = 0;
-      this.postfx.setFade(0);
-      this.respawnPending = false;
-      this.setState('riding');
-      this.callbacks.onRespawn?.();
+  private updateRespawnlessFail(dt: number): void {
+    this.failTimer += dt;
+    if (this.failTimer > 1.2 && this.failTimer - dt <= 1.2) {
+      this.postfx.setFade(0.55);
     }
   }
 
@@ -714,34 +786,39 @@ export class GameManager {
   };
 
   private onVisibility = () => {
-    if (document.hidden && this.state === 'riding') this.togglePause();
+    if (document.hidden && this.state === 'playing') this.togglePause();
   };
 
   private loop = (t: number) => {
     this.rafId = requestAnimationFrame(this.loop);
     const rawDt = (t - this.lastT) / 1000;
     this.lastT = t;
-    const dt = clamp(rawDt, 0.0005, 0.1); // 10 FPS floor — sim time tracks real time (§36)
+    // §8: gameplay time derives from the DSP hardware clock, NOT rAF deltas —
+    // physics can never fall behind the music timeline at low render FPS.
+    let dt: number;
+    const audioNow = this.dspClock.getAudioTime();
+    if (this.dspClock.isRunning && Number.isFinite(audioNow)) {
+      dt = clamp(audioNow - this.lastAudioT, 0, 0.5);
+      this.lastAudioT = audioNow;
+    } else {
+      // no timeline yet (boot/menu before first run): fall back to real time
+      dt = clamp(rawDt, 0.0005, 0.25);
+    }
     if (rawDt > 0) this.fps = damp(this.fps, 1 / rawDt, 3, dt);
     this.time += dt;
 
     this.adaptQuality(clamp(rawDt, 0, 1));
-    if (this.running) {
+    if (this.state === 'paused') {
+      // input must keep polling while paused so ESC can resume
+      const ev = this.input.update(dt);
+      if (ev.togglePause) this.togglePause();
+      if (ev.restart) this.restart();
+    } else {
       this.tick(dt);
     }
     this.render();
   };
 
-  /** dev/verification helpers: stop the world but keep rendering */
-  debugFreeze() {
-    this.running = false;
-  }
-  debugUnfreeze() {
-    this.running = true;
-    this.lastT = performance.now();
-  }
-
-  /** step down render quality if the GPU can't keep up (real-time based) */
   private adaptQuality(realDt: number) {
     if (this.qualityTier <= 0) return;
     if (this.fps < 28 && this.running) {
@@ -771,73 +848,38 @@ export class GameManager {
     }
   }
 
-  // ------------------------------------------------------------- rhythm tick ----
-  /**
-   * All music-driven world reactions. Reads DSP time; never frame time.
-   */
-  private tickRhythm(dt: number) {
-    if (!this.rhythm || !this.musicStarted) return;
-    const audioT = this.rhythm.getCurrentAudioTime();
-    if (audioT < 0) return;
-
-    // lookahead music scheduling on the hardware timeline
-    this.music.pump();
-
-    // beat-phase queries + downbeat crossing detection
-    this.rhythm.update();
-    const beats = this.rhythm.drainBeatEvents();
-    const energy = this.rhythm.getEnergy();
-
-    for (const beat of beats) {
-      // ---- camera: +3° FOV kick decaying 0.12 s on downbeats ----
-      const kick = beat.major ? 3 : 1.6;
-      this.cam.addFovKick(kick * (0.5 + energy * 0.5), 0.12);
-      // ---- lighting: 80 ms ×1.25 pulse on emissives ----
-      this.weather.pulse(0.08);
-      if (beat.major && energy > 0.8) {
-        this.cam.addTrauma(0.08); // subtle impact on big hits only
-      }
-    }
-
-    // ---- embers: +300% during chorus / drop / high energy ----
-    this.weather.emberBoost = energy > 0.8 ? 4.0 : 1.0;
-    this.weather.emberFloor = energy > 0.8 ? 0.22 : 0;
-
-    // ---- weather hard cuts from the cue sheet (loop-aware; demo sheet only —
-    // a selected song has no authored preset cues, autoCycle evolves instead) ----
-    const loopSec = this.rhythm.loopSec > 0 ? this.rhythm.loopSec : LOOP_SEC;
-    const tLoop = ((audioT % loopSec) + loopSec) % loopSec;
-    const presetTimes = this.rhythm.getTypeTimes('preset');
-    let presetIdx = -1;
-    for (let i = presetTimes.length - 1; i >= 0; i--) {
-      if (presetTimes[i] <= tLoop) {
-        presetIdx = i;
-        break;
-      }
-    }
-    if (presetIdx >= 0 && presetIdx !== this.appliedPreset) {
-      this.appliedPreset = presetIdx;
-      this.weather.setPreset(presetIdx, true); // HARD CUT — visuals only
-    }
-
-    // ---- lyrics (DSP-driven) ----
-    this.lyrics?.update(tLoop);
-
-    // ---- rhythm gates (scheduled against the DSP clock) ----
-    this.handleGateEvents(dt);
-  }
-
-  private tick(dt: number) {
+  // ------------------------------------------------------------- main tick ----
+  private tick(dt: number): void {
     const events = this.input.update(dt);
 
-    // global one-shots
-    if (events.toggleCamera) this.cam.toggle();
-    if (events.togglePause) this.togglePause();
-    if (events.restart && this.state !== 'menu') this.restart();
-    if (events.tapTempo) this.handleTapTempo();
-    if (events.weather > 0) this.setWeather(events.weather - 1);
-    if (events.gearUp && this.state === 'riding') this.bike.forceShift(1);
-    if (events.gearDown && this.state === 'riding') this.bike.forceShift(-1);
+    if (events.toggleCamera && this.state === 'playing') this.cam.toggle();
+    if (events.togglePause && (this.state === 'playing' || this.state === 'paused')) this.togglePause();
+    if (events.restart) this.restart();
+
+    // §8: read the DSP clock AFTER event handling — a same-frame restart
+    // re-anchors the epoch, and the countdown branch must see the fresh value
+    // (a stale positive audioT here would instantly skip the countdown and
+    // desync the music grid from the reset chart).
+    const audioT = this.dspClock.getAudioTime();
+
+    // ---- countdown tick ----
+    if (this.state === 'countdown') {
+      const cd = Math.ceil(-audioT);
+      if (audioT >= -0.06) {
+        this.startPlaybackAtZero();
+        this.setState('playing');
+      } else {
+        // hold the bike steady, revving
+        this.physicsAccum += dt;
+        let steps = 0;
+        while (this.physicsAccum >= PHYSICS_H && steps < 12) {
+          this.bike.step(PHYSICS_H, { throttle: 0.25, brake: 1, rearBrake: 0, steer: 0, tuck: false, lookBack: false });
+          this.physicsAccum -= PHYSICS_H;
+          steps++;
+        }
+        void cd;
+      }
+    }
 
     const snapshot = {
       throttle: this.input.throttle,
@@ -849,103 +891,109 @@ export class GameManager {
     };
 
     let ev: ReturnType<typeof this.bike.step> | undefined;
-    if (this.state === 'riding') {
-      // ---- physics: FIXED 1/120 s accumulator (§36) ----
+    if (this.state === 'playing' || this.state === 'failed' || this.state === 'victory') {
+      // failed/victory: coast to a stop (no input)
+      const frozen = this.state !== 'playing';
+      const snap = frozen ? { throttle: 0, brake: 0.4, rearBrake: 0.6, steer: 0, tuck: false, lookBack: false } : snapshot;
+
       this.physicsAccum += dt;
       let steps = 0;
-      while (this.physicsAccum >= PHYSICS_H && steps < 12 && this.state === 'riding') {
-        const stepEv = this.bike.step(PHYSICS_H, snapshot);
+      // step cap must cover the sim-dt clamp (0.5 s → 60 steps): a lower cap
+      // silently desyncs bike.s from the audio timeline at low frame rates.
+      while (this.physicsAccum >= PHYSICS_H && steps < 60) {
+        const stepEv = this.bike.step(PHYSICS_H, snap);
         ev = stepEv;
         this.physicsAccum -= PHYSICS_H;
         steps++;
-        if (stepEv.barrierHit) {
-          this.triggerCrash();
-          break;
+        if (!frozen && stepEv.barrierHit) this.handleImpact();
+        if (!frozen && this.traffic.collideAndScore(this.bike, PHYSICS_H)) break;
+      }
+      if (steps === 60) this.physicsAccum = 0;
+
+      if (this.state === 'playing') {
+        this.scoring.tick(dt);
+        // score trickle: distance + speed bonus
+        this.scoring.score += dt * this.bike.v * 0.6 * (this.bike.v > 55.6 ? 1.5 : 1);
+
+        // ---- rhythm: gates judged against the DSP clock ----
+        const gateEvents = this.gates.update(dt, audioT, this.bike.s, this.bike.v, this.bike.x);
+        this.handleGateEvents(gateEvents);
+
+        // ---- biome switching on musical sections (§25/§26) ----
+        this.updateBiomes(audioT);
+
+        // ---- beat-reactive world (FOV kicks, light pulses, embers) ----
+        this.tickBeatReactions(audioT);
+
+        // ---- lyrics ----
+        const lyricT = this.selection.source === 'demo' ? ((audioT % LOOP_SEC) + LOOP_SEC) % LOOP_SEC : audioT;
+        this.lyrics?.update(lyricT);
+
+        // song end detection (buffer playback) — onEnded also covers it
+        if (this.selection.source !== 'demo' && this.analysis && audioT >= this.analysis.duration - 0.05 && this.bike.v < 1) {
+          this.onSongEnded();
         }
-        if (this.traffic.collideAndScore(this.bike, PHYSICS_H)) {
-          break; // crash triggered inside
-        }
       }
-      if (steps === 12) this.physicsAccum = 0; // spiral-of-death guard
-      // audio events
-      if (ev?.backfire) this.audio.backfire();
-      if (ev && (ev.shiftedUp || ev.shiftedDown)) {
-        this.audio.shiftClack();
-        this.audio.shiftDuck();
-      }
-      if (ev?.jointCrossed) {
-        this.audio.jointThump(kmh(this.bike.v));
-        this.cam.addTrauma(clamp(this.bike.v * 0.0035, 0.03, 0.14));
-      }
-      // score trickle: distance + speed bonus
-      this.score += dt * this.bike.v * 0.6 * (this.bike.v > 55.6 ? 1.5 : 1);
-      this.topSpeed = Math.max(this.topSpeed, kmh(this.bike.v));
-      // combo decay
-      if (this.comboTimer > 0) {
-        this.comboTimer -= dt;
-        if (this.comboTimer <= 0) this.combo = 1;
-      }
-    } else if (this.state === 'menu') {
+    } else if (this.state === 'menu' || this.state === 'search' || this.state === 'loading' || this.state === 'analyzing') {
       // attract mode: gentle cruise
       this.physicsAccum += dt;
-      while (this.physicsAccum >= PHYSICS_H) {
+      let steps = 0;
+      while (this.physicsAccum >= PHYSICS_H && steps < 12) {
         this.bike.step(PHYSICS_H, { ...snapshot, throttle: 0.42, brake: 0, rearBrake: 0 });
         this.physicsAccum -= PHYSICS_H;
+        steps++;
       }
       this.traffic.collideAndScore(this.bike, dt);
-    } else if (this.state === 'crashing') {
-      this.updateRespawn(dt);
+      this.menuBiomeTimer += dt;
+      if (this.menuBiomeTimer > 22) {
+        this.menuBiomeTimer = 0;
+        const next = (this.appliedBiome + 1) % 4;
+        this.biomes.setBiome(next, true);
+        this.appliedBiome = next;
+      }
+    } else if ((this.state as GameState) === 'failed') {
+      this.updateRespawnlessFail(dt);
     }
 
-    // rhythm (music pump + beat reactions + gates + lyrics) — even while crashing
-    this.tickRhythm(dt);
-    if (this.musicStarted) this.songHost?.sync(dt);
+    // shared world update (everything except paused)
+    this.traffic.update(dt, this.bike.s, this.bike.v);
+    this.highway.update(this.bike.s, dt);
+    this.highway.tick(this.time);
+    this.bike.updateVisuals(dt, this.time, this.cam.mode === 'cockpit');
 
-    if (this.state === 'paused') {
-      // world frozen; only camera micro-motion
-    } else {
-      this.traffic.update(dt, this.bike.s, this.bike.v);
-      this.highway.update(this.bike.s, dt);
-      this.highway.tick(this.time);
-      this.bike.updateVisuals(dt, this.time, this.cam.mode === 'cockpit');
-      // weather
-      this.tmpFwd.set(Math.sin(this.bike.worldYaw), 0, Math.cos(this.bike.worldYaw));
-      this.tmpVel.copy(this.tmpFwd).multiplyScalar(this.bike.v);
-      this.weather.cacheTrafficSpray(this.traffic);
-      this.weather.frameIdx++;
-      this.traffic.rainBoost = this.weather.rainAmount;
-      this.weather.update(dt, this.bike.worldPos, this.tmpFwd, this.tmpVel, this.bike, this.traffic, this.highway, this.cam.camera);
-      // dashboard + audio
-      const tel = this.bike.telemetry();
-      this.dashboard.update(dt, tel.rpm, tel.speedKmh, tel.gear, this.combo, tel.rpm > 14200 && this.input.throttle > 0.4);
-      this.audio.update(dt, {
-        rpm: tel.rpm,
-        throttle: this.state === 'riding' ? snapshot.throttle : 0,
-        speedKmh: tel.speedKmh,
-        tuck: this.bike.tuck,
-        limiter: this.bike.limiterCut,
-        rain: this.weather.rainAmount,
-        crashed: this.state === 'crashing',
-        shifting: this.bike.model.shiftTimer > 0,
-        gear: tel.gear,
-      });
-      this.renderer.toneMappingExposure = damp(this.renderer.toneMappingExposure, this.weather.postState().exposure, 4, dt);
-    }
+    this.tmpFwd.set(Math.sin(this.bike.worldYaw), 0, Math.cos(this.bike.worldYaw));
+    this.tmpVel.copy(this.tmpFwd).multiplyScalar(this.bike.v);
+    this.weather.cacheTrafficSpray(this.traffic);
+    this.weather.frameIdx++;
+    this.traffic.rainBoost = this.weather.rainAmount;
+    this.biomes.update(dt, this.bike.s, this.bike.worldPos, this.cam.camera.position.y);
+    this.weather.update(dt, this.bike.worldPos, this.tmpFwd, this.tmpVel, this.bike, this.traffic, this.highway, this.cam.camera);
 
-    // camera always (even paused, for subtle motion? no — frozen in pause)
-    if (this.state !== 'paused') {
-      this.cam.update(dt, this.bike, {
-        lookBack: this.input.lookBack,
-        tuck: this.input.tuckActive,
-        accel: this.bike.model.aLong,
-        brakeInput: this.input.brake,
-      });
-    }
+    const tel = this.bike.telemetry();
+    this.dashboard.update(dt, tel.rpm, tel.speedKmh, tel.gear, this.scoring.combo, tel.rpm > 14200 && this.input.throttle > 0.4);
+    this.audio.update(dt, {
+      rpm: tel.rpm,
+      throttle: this.state === 'playing' ? snapshot.throttle : this.state === 'countdown' ? 0.25 : 0,
+      speedKmh: tel.speedKmh,
+      tuck: this.bike.tuck,
+      limiter: this.bike.limiterCut,
+      rain: this.weather.rainAmount,
+      crashed: this.crashingOut,
+      shifting: this.bike.model.shiftTimer > 0,
+      gear: tel.gear,
+    });
+    this.renderer.toneMappingExposure = damp(this.renderer.toneMappingExposure, this.weather.postState().exposure, 4, dt);
 
-    // postfx params
+    this.cam.update(dt, this.bike, {
+      lookBack: this.input.lookBack,
+      tuck: this.input.tuckActive,
+      accel: this.bike.model.aLong,
+      brakeInput: this.input.brake,
+    });
+
     const post = this.weather.postState();
     this.postfx.update(dt, {
-      speedKmh: this.state === 'crashing' ? 0 : kmh(this.bike.v),
+      speedKmh: this.crashingOut ? 0 : kmh(this.bike.v),
       bloom: post.bloom,
       saturation: post.saturation,
       contrast: post.contrast,
@@ -953,35 +1001,129 @@ export class GameManager {
       vignette: post.vignette,
     });
 
+    // demo synth beat scheduling (demo mode only)
+    if (this.selection.source === 'demo' && this.demoMusicOn && this.state === 'playing') this.music.pump();
+
     // telemetry to React at 12 Hz
     this.telemetryTimer += dt;
     if (this.telemetryTimer > 1 / 12) {
       this.telemetryTimer = 0;
-      const tel = this.bike.telemetry();
-      this.callbacks.onTelemetry?.({
-        speedKmh: tel.speedKmh,
-        rpm: tel.rpm,
-        gear: tel.gear,
-        gearLabel: tel.gearLabel,
-        leanDeg: tel.leanDeg,
-        wheelieDeg: tel.wheelieDeg,
-        score: Math.floor(this.score),
-        combo: this.combo,
-        rhythmCombo: this.rhythmCombo,
-        gatePerfects: this.gates.stats.perfect,
-        distanceKm: tel.distanceKm,
-        topSpeedKmh: this.topSpeed,
-        nearMisses: this.nearMisses,
-        state: this.state,
-        weather: this.weather.presetName,
-        section: this.rhythm ? this.rhythm.getSectionName() : '—',
-        musicTime: this.rhythm ? this.rhythm.getCurrentAudioTime() : 0,
-        fps: this.fps,
-        cameraMode: this.cam.mode,
-        gamepad: this.input.gamepadConnected,
-        song: this.songInfo(),
-      });
+      this.emitTelemetry(tel, audioT);
     }
+  }
+
+  /** FOV kicks on beats + weather preset tracking for demo mode */
+  private tickBeatReactions(audioT: number): void {
+    if (!this.rhythm) return;
+    this.rhythm.update();
+    const beats = this.rhythm.drainBeatEvents();
+    const energy = this.selection.source === 'demo' ? this.rhythm.getEnergy() : this.analysis ? energyAt(this.analysis, audioT) : 0.6;
+    for (const beat of beats) {
+      const kick = beat.major ? 3 : 1.6;
+      this.cam.addFovKick(kick * (0.5 + energy * 0.5), 0.12);
+      this.weather.pulse(0.08);
+      if (beat.major && energy > 0.8) this.cam.addTrauma(0.08);
+    }
+    this.weather.emberBoost = energy > 0.8 ? 4.0 : 1.0;
+    this.weather.emberFloor = energy > 0.8 ? 0.22 : 0;
+
+    // demo mode: weather hard cuts ride the authored cue sheet
+    if (this.selection.source === 'demo') {
+      const loopSec = this.rhythm.loopSec > 0 ? this.rhythm.loopSec : LOOP_SEC;
+      const tLoop = ((audioT % loopSec) + loopSec) % loopSec;
+      const presetTimes = this.rhythm.getTypeTimes('preset');
+      let presetIdx = -1;
+      for (let i = presetTimes.length - 1; i >= 0; i--) {
+        if (presetTimes[i] <= tLoop) {
+          presetIdx = i;
+          break;
+        }
+      }
+      if (presetIdx >= 0 && presetIdx !== this.appliedPreset) {
+        this.appliedPreset = presetIdx;
+        this.weather.setPreset(presetIdx, true);
+        const biomeForPreset = [2, 3, 1, 0][presetIdx] as 0 | 1 | 2 | 3;
+        this.biomes.setBiome(biomeForPreset, true);
+        this.appliedBiome = biomeForPreset;
+      }
+    }
+  }
+
+  /** song mode: switch biome on analysis section changes (cycled, deterministic) */
+  private updateBiomes(audioT: number): void {
+    if (this.selection.source === 'demo' || !this.analysis) return;
+    const secs = this.analysis.sections;
+    let idx = 0;
+    for (let i = 0; i < secs.length; i++) {
+      if (audioT >= secs[i].start) idx = i;
+      else break;
+    }
+    if (idx !== this.lastSectionIndex) {
+      const first = this.lastSectionIndex === -1;
+      this.lastSectionIndex = idx;
+      if (!first) {
+        const biome = SECTION_BIOME_CYCLE[idx % SECTION_BIOME_CYCLE.length];
+        this.biomes.setBiome(biome, true); // musical, instantaneous cut (§26)
+        this.appliedBiome = biome;
+        this.callbacks.onPopup?.(`⟹ ${BIOME_NAMES[biome]}`, 0, 'biome');
+      } else {
+        this.appliedBiome = SECTION_BIOME_CYCLE[0];
+        this.biomes.setBiome(this.appliedBiome, true);
+      }
+    }
+  }
+
+  private emitTelemetry(tel: ReturnType<typeof this.bike.telemetry>, audioT: number): void {
+    const s = this.scoring;
+    const total = s.perfects + s.goods + s.misses;
+    const sectionName =
+      this.selection.source === 'demo'
+        ? (this.rhythm?.getSectionName() ?? '—')
+        : this.analysis
+          ? sectionAt(this.analysis, Math.max(0, audioT)).kind
+          : '—';
+    this.callbacks.onTelemetry?.({
+      state: this.state,
+      speedKmh: tel.speedKmh,
+      rpm: tel.rpm,
+      gear: tel.gear,
+      gearLabel: tel.gearLabel,
+      leanDeg: tel.leanDeg,
+      score: Math.floor(s.score),
+      combo: s.combo,
+      multiplier: multiplierForCombo(s.combo),
+      hp: Math.max(0, s.hp),
+      hpFlash: s.hpFlash > 0,
+      perfects: s.perfects,
+      goods: s.goods,
+      misses: s.misses,
+      crashes: s.crashes,
+      bestCombo: s.bestCombo,
+      accuracy: total > 0 ? (s.perfects + s.goods) / total : 0,
+      musicTime: Math.max(0, audioT),
+      songDuration: this.analysis?.duration ?? LOOP_SEC,
+      bpm: this.analysis?.bpm ?? 128,
+      section: sectionName,
+      biome: BIOME_NAMES[Math.max(0, this.appliedBiome)],
+      fps: this.fps,
+      cameraMode: this.cam.mode,
+      gamepad: this.input.gamepadConnected,
+      countdown: this.state === 'countdown' ? Math.min(3, Math.max(1, Math.ceil(-audioT))) : null,
+      song: { ...this.selection },
+      analysisQuality: this.analysis?.quality ?? '—',
+      debug: {
+        audioTime: +audioT.toFixed(3),
+        beatPhase: this.rhythm ? +this.rhythm.getBeatPhase().toFixed(3) : 0,
+        subdivision: this.chart ? 4 : 0,
+        playerS: Math.round(this.bike.s),
+        laneX: +this.bike.x.toFixed(2),
+        activeGates: this.gates.activeCount(),
+        nextGateTime: +this.gates.nextNoteTime(audioT).toFixed(3),
+        gateDelta: +this.gates.stats.lastDelta.toFixed(4),
+        distanceKm: tel.distanceKm,
+        nearMisses: this.nearMissCount,
+      },
+    });
   }
 
   private render() {
@@ -996,13 +1138,16 @@ export class GameManager {
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.input.dispose();
     this.music.dispose();
-    this.songHost?.dispose();
+    this.bufferPlayer?.dispose();
+    this.loader?.cancel();
     this.audio.dispose();
     this.dashboard.dispose();
     this.lyrics?.dispose();
     this.cam.dispose();
     this.postfx.dispose();
     this.weather.dispose();
+    this.biomes.dispose();
+    this.gates.dispose(this.scene);
     this.traffic.dispose(this.scene);
     this.scene.remove(this.bike.group);
     this.bike.group.traverse((o) => {

@@ -90,6 +90,13 @@ export class TrafficManager {
 
   onNearMiss: ((e: NearMissEvent) => void) | null = null;
   onCollision: ((heavy: boolean) => void) | null = null;
+  /**
+   * §28 rhythm de-confliction: veto a spawn that would put traffic in a gate
+   * lane within ±1.5 s of that gate's intended crossing time.
+   */
+  gateGuard: ((lane: number, s: number, playerS: number, playerV: number) => boolean) | null = null;
+  spawnFailGate = 0;
+  private lastPlayerV = 0;
 
   constructor(private highway: Highway, scene: THREE.Scene) {
     const mix: VehicleKind[] = [];
@@ -249,6 +256,11 @@ export class TrafficManager {
         this.spawnFailCorridor++;
         continue;
       }
+      // rhythm de-confliction: keep gate lanes clear near their beat time (§28)
+      if (this.gateGuard && !this.gateGuard(lane, s, playerS, this.lastPlayerV)) {
+        this.spawnFailGate++;
+        continue;
+      }
 
       car.active = true;
       car.s = s;
@@ -276,6 +288,8 @@ export class TrafficManager {
   // ------------------------------------------------------------------ update ----
   update(dt: number, playerS: number, playerV: number) {
     this.time += dt;
+    this.lastPlayerV = playerV;
+    this.lastPlayerV = playerV;
 
     // ---- maintain population (15–25) ----
     let guard = 0;
@@ -359,6 +373,8 @@ export class TrafficManager {
               }
             }
             if (clear) {
+              // lane changes also respect the rhythm de-confliction (§28)
+              if (this.gateGuard && !this.gateGuard(target, car.s, playerS, this.lastPlayerV)) continue;
               // solver check: the maneuver must not seal the corridor
               const occ = this.occupancyAt(car.s, WINDOW, target, car.s);
               let sealsWall = false;

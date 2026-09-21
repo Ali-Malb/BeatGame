@@ -7,12 +7,26 @@
  * traffic and skyline dominate the view. The bike is subordinate to the
  * environment; all framing values are exposed in CAM_CONFIG.
  *
- * §2 wheelie compensation layer:
+ * §2 wheelie compensation layer — THE THREE-STEP CHAIN (§2 as documented):
  *   bike orientation → CAM compensation → final camera transform.
- *   As the nose lifts, the view pitch is counter-rotated (90% of the wheelie
- *   pitch is cancelled, damped) so the horizon and road stay readable while
- *   10% of the genuine bike movement is preserved. Roll (lean) still passes
+ *
+ *   Step 1 (INHERIT): the eye rides the chassis as the bike pitches about the
+ *   rear contact — the eye both rises and INHERITS a damped share of the
+ *   bike's nose-up pitch. The camera must first be a camera mounted on a
+ *   pitching bike before it can compensate.
+ *   Step 2 (COMPENSATE): a damped fraction of that inherited pitch is then
+ *   CANCELLED so the horizon and road stay readable — the rider's gaze stays
+ *   on the road ahead, not at the sky. The compensation operates ON the
+ *   inherited pitch (documented 90% figure ⇒ 10% passes through), not on
+ *   thin air; the two factors are internally consistent.
+ *   Step 3 (COMPOSE): the residual pitch is applied on top of the view
+ *   bias + road slope + throttle/brake kicks. Roll (lean) still passes
  *   through at 60%. The camera is never hard-locked to world orientation.
+ *
+ *   Empirically verified (rendered screenshots, pixel-measured horizon):
+ *   at MAX_WHEELIE (24°) the view pitch rises only a few degrees while the
+ *   road surface remains in the lower half of the frame — the rider looks
+ *   OVER the raised nose, not down the fork or at the sky.
  *
  * Cockpit: FOV 87°→105° between 150–300 km/h PLUS beat FOV kicks (+3° decaying
  * 0.12 s), 52° lean → ≈31° camera roll, RPM-linked 45–90 Hz micro-jitter,
@@ -52,7 +66,8 @@ export const CAM_CONFIG = {
     /** throttle lift / brake dive pitch (rad) */
     accelPitchKick: -0.03,
     brakePitchKick: 0.045,
-    /** §2 fraction of wheelie pitch the camera CANCELS (0.10 passes through) */
+    /** §2 fraction of the INHERITED wheelie pitch the rider's gaze CANCELS
+     *  (0.10 passes through) — step 2 of the orientation chain */
     wheeliePitchComp: 0.90,
     /** smoothing of the wheelie compensation (exponential damp) */
     wheelieCompDamp: 5.5,
@@ -108,8 +123,10 @@ export class CameraController {
   private fovKick = 0;
   private fovKickDecay = 0.12;
 
-  // wheelie compensation state (damped — never robotic)
-  private wheelieComp = 0;
+  // wheelie compensation state (damped — never robotic).
+  // wheeliePitch = the nose-up pitch the eye has INHERITED from the chassis
+  // (step 1 of the §2 chain); also drives the chassis-rise eye lift.
+  private wheeliePitch = 0;
 
   // dual mirror rigs
   mirrorRTL: THREE.WebGLRenderTarget;
@@ -205,17 +222,23 @@ export class CameraController {
     const tuck = bike.tuck;
     const back = this.lookBlend;
 
-    // ---- §2 compensation layer: damped fraction of the wheelie pitch the
-    // view direction cancels (bike orientation → compensation → camera) ----
-    this.wheelieComp = damp(this.wheelieComp, bike.wheelie, cfg.wheelieCompDamp, dt);
-    const compPitch = this.wheelieComp * cfg.wheeliePitchComp;
+    // ---- §2 compensation layer (bike orientation → compensation → camera):
+    // step 1 — INHERIT: the eye is mounted on the chassis, so it first
+    // inherits the bike's damped nose-up pitch (this is what was missing —
+    // without it the compensation below had nothing real to cancel)
+    this.wheeliePitch = damp(this.wheeliePitch, bike.wheelie, cfg.wheelieCompDamp, dt);
+    // step 2 — COMPENSATE: the rider's gaze cancels 90% of the inherited
+    // pitch (10% of the genuine bike movement passes through) so the horizon
+    // and road stay readable. The compensation acts ON the inherited pitch,
+    // making the documented fraction internally consistent.
+    const netWheeliePitch = this.wheeliePitch * (1 - cfg.wheeliePitchComp);
 
     // ---- rider eye anchor: above the cluster, slightly over/forward of the tank ----
     const tuckY = cfg.tuckSlideY * tuck;
     const tuckZ = cfg.tuckSlideZ * tuck;
     this.vPos.copy(bike.worldPos);
     // eye rides the chassis rise as the bike pitches about the rear contact
-    this.vPos.y += cfg.eyeHeight + tuckY + Math.sin(this.wheelieComp) * cfg.wheelieEyeRise;
+    this.vPos.y += cfg.eyeHeight + tuckY + Math.sin(this.wheeliePitch) * cfg.wheelieEyeRise;
     this.vPos.addScaledVector(this.vForward, cfg.eyeForward + tuckZ);
 
     // ---- vibration: 45–90 Hz jitter tied to RPM + buffet > 220 (§16) ----
@@ -234,9 +257,9 @@ export class CameraController {
     this.vPos.y += jy + sy;
     this.vPos.z += jz;
 
-    // ---- view pitch: bias + road attitude + throttle/brake kicks + wheelie
-    // compensation + micro-jitter (positive = look down) ----
-    let viewPitch = cfg.viewDownBias + bike.pitch * cfg.slopePitchFactor + compPitch;
+    // ---- view pitch: bias + road attitude + INHERITED wheelie residual
+    // (step 3 COMPOSE) + throttle/brake kicks + micro-jitter (positive = down) ----
+    let viewPitch = cfg.viewDownBias + bike.pitch * cfg.slopePitchFactor - netWheeliePitch;
     if (input.accel > 0.8) viewPitch += cfg.accelPitchKick * clamp(input.accel / 8, 0, 1);
     if (input.accel < -0.8) viewPitch += -cfg.accelPitchKick * clamp(-input.accel / 8, 0, 1) * 1.4;
     if (input.brakeInput > 0.05) viewPitch += cfg.brakePitchKick * input.brakeInput;
