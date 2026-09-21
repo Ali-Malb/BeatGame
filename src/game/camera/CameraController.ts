@@ -132,6 +132,7 @@ export const CAM_CONFIG = {
   cinematic: {
     distBehind: 11,
     height: 3.1,
+    heightSpeedRise: 0.25,
     orbitAmp: 3.2,
     orbitRate: 0.21,
     heightAmp: 1.1,
@@ -380,7 +381,7 @@ export class CameraController {
     const desired = this.vPos;
     desired.copy(bike.worldPos);
     let dist = cfg.distBehind;
-    let height = cfg.height + speedK * cfg.heightSpeedRise;
+    let height = cfg.height + speedK * (cfg.heightSpeedRise ?? 0);
     let lateral = 0;
     if (mode === 'dynamic') {
       dist += speedK * (cfg.distBehindSpeed ?? 0);

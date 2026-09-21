@@ -562,12 +562,14 @@ export class WeatherController {
     // traffic headlight cones + wet asphalt + lamp emission (cheap global tweaks)
     traffic.headlightsOn = this.headlightsOn;
     const wet = this.current.wetness;
-    this.mats.asphalt.roughness = lerp(0.93, 0.08, wet);
-    this.mats.asphalt.metalness = lerp(0.02, 0.62, wet);
-    this.mats.asphalt.envMapIntensity = lerp(0.25, 1.7, wet);
-    this.mats.asphaltOncoming.roughness = lerp(0.95, 0.1, wet);
-    this.mats.asphaltOncoming.metalness = lerp(0.0, 0.5, wet);
-    this.mats.asphaltOncoming.envMapIntensity = lerp(0.2, 1.2, wet);
+    // wet asphalt: keep roughness believable (asphalt, not a mirror) — sharp
+    // sheen comes from envMapIntensity + the light pools, not zero roughness
+    this.mats.asphalt.roughness = lerp(0.93, 0.28, wet);
+    this.mats.asphalt.metalness = lerp(0.02, 0.42, wet);
+    this.mats.asphalt.envMapIntensity = lerp(0.25, 1.55, wet);
+    this.mats.asphaltOncoming.roughness = lerp(0.95, 0.32, wet);
+    this.mats.asphaltOncoming.metalness = lerp(0.0, 0.34, wet);
+    this.mats.asphaltOncoming.envMapIntensity = lerp(0.2, 1.1, wet);
 
     // env refresh: only while the sky is transitioning, plus a rare top-up
     this.envRefreshTimer += dt;

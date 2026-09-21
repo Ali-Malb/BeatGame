@@ -155,7 +155,10 @@ async function main(): Promise<void> {
   let xMax = -Infinity;
   const xSampler = setInterval(() => {
     page
-      .evaluate(() => (window as unknown as { __game: { bike: { x: number } } }).__game.bike.x)
+      .evaluate(() => {
+        const g = (window as unknown as { __game?: { bike: { x: number } } }).__game;
+        return g ? g.bike.x : 0;
+      })
       .then((x) => {
         if (x < xMin) xMin = x;
         if (x > xMax) xMax = x;
@@ -180,6 +183,22 @@ async function main(): Promise<void> {
   await page.keyboard.up('KeyD');
   clearInterval(xSampler);
   const steerRange = xMax - xMin;
+  // clear traffic from the bot's corridor before re-centering — a rear-end
+  // during the sweep is legit gameplay but would cascade into later checks
+  await page.evaluate(() => {
+    const g = (window as unknown as { __game?: { traffic: { clearCorridor(s: number, lane: number, len?: number): void; findClearLane(s: number): number }; bike: { s: number } } }).__game;
+    if (!g) return;
+    const lane = g.traffic.findClearLane(g.bike.s);
+    g.traffic.clearCorridor(g.bike.s, lane, 90);
+  });
+  // re-center after the sweep — the blind bot may have leaned into a barrier
+  // (correct game behavior); a tumble here would cascade into later checks
+  await page.evaluate(() => {
+    const m = (window as unknown as { __game: { bike: { model: { x: number; vx: number; crashed: boolean } } } }).__game.bike.model;
+    m.x = 1.75;
+    m.vx = 0;
+    m.crashed = false;
+  });
   await page.keyboard.down('ShiftLeft');
   await page.waitForFunction(
     () => (window as unknown as { __game: { dspClock: { getAudioTime(): number } } }).__game.dspClock.getAudioTime() > 11,
@@ -480,10 +499,8 @@ async function main(): Promise<void> {
   }
   await page.evaluate(() => {
     const w = window as unknown as { __hpTimer?: ReturnType<typeof setInterval> };
-    if (w.__hpTimer) {
-      clearInterval(w.__hpTimer);
-      w.__hpTimer = undefined;
-    }
+    // KEEP the keep-alive running — later sections (camera/pause/restart) need
+    // the run alive; the failure path installs its own timer over this one
   });
 
   // ---------- HP/failed path ----------
@@ -494,6 +511,17 @@ async function main(): Promise<void> {
     await page.evaluate(() => {
       const g = (window as unknown as { __game: { startDemo(): Promise<void> } }).__game;
       void g.startDemo();
+    });
+    await page.waitForFunction(() => (window as unknown as { __game: { getState(): string } }).__game.getState() === 'playing', { timeout: 20000 });
+  }
+  // restart first if the demo song has nearly ended (fail test needs runway)
+  const runway = await page.evaluate(() => {
+    const g = (window as unknown as { __game: { dspClock: { getAudioTime(): number }; analysis: { duration: number } | null; restart(): void } }).__game;
+    return (g.analysis?.duration ?? 0) - g.dspClock.getAudioTime();
+  });
+  if (runway < 15) {
+    await page.evaluate(() => {
+      (window as unknown as { __game: { restart(): void } }).__game.restart();
     });
     await page.waitForFunction(() => (window as unknown as { __game: { getState(): string } }).__game.getState() === 'playing', { timeout: 20000 });
   }
