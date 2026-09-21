@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+.next/
+out/
+dist/
+tsconfig.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.local
+.env*.local
+
+# Logs & debug output
+*.log
+server.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tmp/
+*.png
