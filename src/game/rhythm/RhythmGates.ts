@@ -164,10 +164,17 @@ export class RhythmGates {
     const capGeo = new THREE.BoxGeometry(0.18, 0.28, 0.86);
     const haloGeo = new THREE.PlaneGeometry(3.4, 1.6);
     haloGeo.rotateX(-Math.PI / 2);
+    // world-anchoring hardware (§12): posts + painted lane pad so gates read
+    // as physical structures on the road, not floating UI bars
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x2e3238, roughness: 0.55, metalness: 0.6 });
+    const postGeo = new THREE.BoxGeometry(0.09, 0.62, 0.09);
+    const padGeo = new THREE.PlaneGeometry(3.3, 4.2);
+    padGeo.rotateX(-Math.PI / 2);
     const barMat = LANE_COLORS.map(
       (c) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(1.15) }),
     );
     const capMats = LANE_COLORS.map((c) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(1.9) }));
+    const padMats = LANE_COLORS.map((c) => new THREE.MeshStandardMaterial({ color: new THREE.Color(c).multiplyScalar(0.5), roughness: 0.75, metalness: 0.0, transparent: true, opacity: 0.45 }));
     const haloMat = LANE_COLORS.map(
       (c) =>
         new THREE.MeshBasicMaterial({
@@ -191,7 +198,15 @@ export class RhythmGates {
         const cap = new THREE.Mesh(capGeo, mats[1]);
         cap.position.set(side * 1.62, 0.58, 0);
         group.add(cap);
+        // anchor post: deck → bar (world-anchored silhouette)
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(side * 1.62, 0.3, 0);
+        group.add(post);
       }
+      // painted lane pad under the bar (follows the deck, fades with judging)
+      const pad = new THREE.Mesh(padGeo, padMats[lane]);
+      pad.position.y = 0.02;
+      group.add(pad);
       const halo = new THREE.Mesh(haloGeo, mats[2]);
       halo.position.y = 0.03;
       group.add(halo);

@@ -11,8 +11,8 @@ export interface BikeJoints {
   root: THREE.Group; // world placement (yaw / pitch / roll)
   body: THREE.Group; // suspension bob + dive pitch
   fork: THREE.Group; // handlebar steering yaw
-  wheelF: THREE.Mesh;
-  wheelR: THREE.Mesh;
+  wheelF: THREE.Group; // spins (tire/rim/spokes/disc children)
+  wheelR: THREE.Group;
   forkTubeL: THREE.Mesh;
   forkTubeR: THREE.Mesh;
   swingarm: THREE.Group;
@@ -44,13 +44,14 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
   const body = new THREE.Group();
   group.add(body);
 
-  // ---- paint materials ----
-  const paint = mat(0x101216, 0.32, 0.55); // satin black
-  const paintRed = mat(0x8f1620, 0.28, 0.6);
+  // ---- paint materials (physical: clearcoat candy finish) ----
+  const paint = new THREE.MeshPhysicalMaterial({ color: 0x101216, roughness: 0.32, metalness: 0.55, clearcoat: 0.8, clearcoatRoughness: 0.25 });
+  const paintRed = new THREE.MeshPhysicalMaterial({ color: 0x8f1620, roughness: 0.26, metalness: 0.6, clearcoat: 1.0, clearcoatRoughness: 0.12 });
   const metal = mat(0x2a2d33, 0.35, 0.8);
   const engine = mat(0x31353c, 0.45, 0.75);
   const tire = mat(0x0c0d0f, 0.95, 0.0);
   const rim = mat(0x06070a, 0.3, 0.9);
+  const indicatorMat = new THREE.MeshBasicMaterial({ color: 0xffa524 });
   const screenMat = new THREE.MeshPhysicalMaterial({
     color: 0x1a2630,
     transparent: true,
@@ -60,31 +61,57 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
     side: THREE.DoubleSide,
   });
   const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfff4d8 });
-  const taillightMat = new THREE.MeshBasicMaterial({ color: 0xff1a08 });
-
-  // ---- wheels ----
+  const taillightMat = new THREE.MeshBasicMaterial({ color: 0xff1a08 });  // ---- wheels: believable spoked assemblies ----
   const wheelGeo = new THREE.TorusGeometry(0.3, 0.075, 14, 40);
   wheelGeo.rotateY(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.09, 24, 1, false);
+  const rimGeo = new THREE.CylinderGeometry(0.215, 0.215, 0.085, 24, 1, false);
   rimGeo.rotateZ(Math.PI / 2);
 
-  const wheelF = new THREE.Mesh(wheelGeo, tire);
-  wheelF.castShadow = true;
-  const rimF = new THREE.Mesh(rimGeo, rim);
-  wheelF.add(rimF);
-  // brake discs
-  const discGeo = new THREE.CylinderGeometry(0.155, 0.155, 0.012, 24);
-  discGeo.rotateZ(Math.PI / 2);
-  for (const side of [-0.07, 0.07]) {
-    const disc = new THREE.Mesh(discGeo, mat(0x8f959c, 0.35, 0.9));
-    disc.position.x = side;
-    wheelF.add(disc);
-  }
+  const buildWheel = (): THREE.Group => {
+    const w = new THREE.Group();
+    w.add(new THREE.Mesh(wheelGeo, tire));
+    const rimM = new THREE.Mesh(rimGeo, rim);
+    w.add(rimM);
+    // Y-spokes (Y-spoke supersport look)
+    const spokeGeo = new THREE.BoxGeometry(0.03, 0.21, 0.03);
+    for (let i = 0; i < 5; i++) {
+      const sp = new THREE.Mesh(spokeGeo, rim);
+      sp.rotation.x = (i / 5) * Math.PI * 2;
+      w.add(sp);
+    }
+    // brake discs + drilled look via dark ring
+    const discGeo = new THREE.CylinderGeometry(0.155, 0.155, 0.012, 24);
+    discGeo.rotateZ(Math.PI / 2);
+    for (const side of [-0.07, 0.07]) {
+      const disc = new THREE.Mesh(discGeo, mat(0x8f959c, 0.35, 0.9));
+      disc.position.x = side;
+      w.add(disc);
+    }
+    // caliper (rear-right / front-left offset)
+    const cal = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.1, 0.07), mat(0x8f1620, 0.4, 0.5));
+    cal.position.set(-0.075, 0.12, 0.06);
+    w.add(cal);
+    // tread block ring (subtle visual rotation cue)
+    const treadGeo = new THREE.BoxGeometry(0.06, 0.03, 0.05);
+    for (let i = 0; i < 8; i++) {
+      const tb = new THREE.Mesh(treadGeo, tire);
+      const a = (i / 8) * Math.PI * 2;
+      tb.position.set(0, Math.cos(a) * 0.3, Math.sin(a) * 0.3);
+      w.add(tb);
+    }
+    return w;
+  };
 
-  const wheelR = new THREE.Mesh(wheelGeo, tire);
+  const wheelF = buildWheel();
+  wheelF.castShadow = true;
+
+  const wheelR = buildWheel();
   wheelR.castShadow = true;
-  const rimR = new THREE.Mesh(rimGeo, rim);
-  wheelR.add(rimR);
+  // rear sprocket
+  const sprocket = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.012, 18), mat(0x707680, 0.4, 0.85));
+  sprocket.rotation.z = Math.PI / 2;
+  sprocket.position.x = 0.1;
+  wheelR.add(sprocket);
 
   // ---- fork / front assembly ----
   // origin at the steering head (y 0.92, z 0.60), raked forward 19.5°
@@ -171,6 +198,13 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
     fair.rotation.z = sx * 0.12;
     const fairRed = addMesh(body, new THREE.BoxGeometry(0.05, 0.1, 0.6), paintRed, sx * 0.215, 0.5, 0.1);
     fairRed.rotation.z = sx * 0.12;
+    // front indicators (small amber pods at the nose sides)
+    const indF = addMesh(body, new THREE.BoxGeometry(0.03, 0.05, 0.09), indicatorMat, sx * 0.2, 0.72, 0.62);
+    indF.castShadow = false;
+    // foot pegs + heel guards
+    const peg = addMesh(body, new THREE.CylinderGeometry(0.014, 0.014, 0.09, 8), metal, sx * 0.2, 0.38, -0.05);
+    peg.rotation.z = Math.PI / 2;
+    addMesh(body, new THREE.BoxGeometry(0.02, 0.1, 0.14), mat(0x14161a, 0.7, 0.3), sx * 0.21, 0.44, -0.05);
   }
   // engine block
   addMesh(body, new THREE.BoxGeometry(0.3, 0.3, 0.45), engine, 0, 0.45, 0.1);
@@ -188,6 +222,11 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
   tail.rotation.x = 0.16;
   const tailRed = addMesh(body, new THREE.BoxGeometry(0.2, 0.08, 0.4), paintRed, 0, 0.9, -0.72);
   tailRed.rotation.x = 0.18;
+  // rear indicators
+  for (const sx of [-1, 1]) {
+    const indR = addMesh(body, new THREE.BoxGeometry(0.035, 0.05, 0.1), indicatorMat, sx * 0.14, 0.83, -0.86);
+    indR.castShadow = false;
+  }
   const tailLight = addMesh(body, new THREE.BoxGeometry(0.14, 0.045, 0.04), taillightMat, 0, 0.87, -0.9);
   tailLight.castShadow = false;
 
@@ -204,8 +243,12 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
   }
   wheelR.position.set(0, -0.05, -0.49);
   swingarm.add(wheelR);
+  // chain run: upper + lower spans from sprocket to countershaft
+  const chainMat = mat(0x4a4e55, 0.5, 0.8);
+  addMesh(swingarm, new THREE.BoxGeometry(0.02, 0.035, 0.62), chainMat, 0.105, 0.115, -0.3);
+  addMesh(swingarm, new THREE.BoxGeometry(0.02, 0.035, 0.5), chainMat, 0.105, -0.075, -0.28);
   // chain guard
-  addMesh(swingarm, new THREE.BoxGeometry(0.05, 0.05, 0.4), mat(0x8f1620, 0.6, 0.2), 0.11, 0.02, -0.3);
+  addMesh(swingarm, new THREE.BoxGeometry(0.05, 0.05, 0.4), mat(0x8f1620, 0.6, 0.2), 0.13, 0.02, -0.3);
   // rear shock
   const shock = addMesh(body, new THREE.CylinderGeometry(0.03, 0.03, 0.32, 10), mat(0xb98a2d, 0.4, 0.8), 0.05, 0.62, -0.32);
   shock.rotation.x = 0.4;

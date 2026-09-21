@@ -10,7 +10,7 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { glowTexture } from '../environment/textures';
 import { RNG } from '../core/utils';
 
-export type VehicleKind = 'sedan' | 'coupe' | 'taxi' | 'boxTruck' | 'flatbed' | 'ambulance' | 'bus';
+export type VehicleKind = 'sedan' | 'coupe' | 'taxi' | 'suv' | 'van' | 'boxTruck' | 'flatbed' | 'ambulance' | 'bus';
 
 export interface VehicleModel {
   group: THREE.Group;
@@ -79,7 +79,34 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
   const paints = [new THREE.Color(0.78, 0.78, 0.8), new THREE.Color(0.08, 0.08, 0.1), new THREE.Color(0.72, 0.73, 0.75), new THREE.Color(0.55, 0.08, 0.1)];
   let paint = rng.pick(paints);
 
-  if (kind === 'sedan' || kind === 'taxi') {
+  if (kind === 'suv') {
+    // taller body, big greenhouse, roof rails
+    halfL = 2.55;
+    halfW = 0.96;
+    height = 1.78;
+    geos.push(cbox(1.9, 0.62, 4.8, 0, 0.62, 0, paint));
+    geos.push(cbox(1.78, 0.62, 3.4, 0, 1.22, -0.3, paint));
+    geos.push(cbox(1.82, 0.4, 3.2, 0, 1.28, -0.3, GLASS));
+    geos.push(cbox(1.86, 0.07, 3.5, 0, 1.56, -0.3, DARK)); // roof rails
+    geos.push(cbox(1.94, 0.24, 0.3, 0, 0.42, 2.42, DARK));
+    geos.push(cbox(1.94, 0.24, 0.3, 0, 0.42, -2.42, DARK));
+    for (const [x, z] of [[-0.92, 1.55], [0.92, 1.55], [-0.92, -1.55], [0.92, -1.55]] as [number, number][]) {
+      geos.push(cwheel(0.38, x, z, TIRE));
+    }
+  } else if (kind === 'van') {
+    // one-box delivery van
+    heavy = false;
+    halfL = 2.6;
+    halfW = 1.0;
+    height = 2.35;
+    geos.push(cbox(2.0, 1.5, 2.0, 0, 1.0, 1.75, paint));
+    geos.push(cbox(2.04, 2.1, 3.2, 0, 1.3, -0.75, new THREE.Color(0.86, 0.87, 0.9)));
+    geos.push(cbox(1.9, 0.55, 0.16, 0, 1.45, 2.74, GLASS));
+    geos.push(cbox(2.08, 0.3, 4.9, 0, 0.45, 0, DARK));
+    for (const [x, z] of [[-0.95, 1.6], [0.95, 1.6], [-0.95, -1.7], [0.95, -1.7]] as [number, number][]) {
+      geos.push(cwheel(0.36, x, z, TIRE));
+    }
+  } else if (kind === 'sedan' || kind === 'taxi') {
     if (kind === 'taxi') paint = new THREE.Color(0.95, 0.72, 0.08);
     halfL = 2.42;
     halfW = 0.88;

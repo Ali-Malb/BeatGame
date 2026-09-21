@@ -101,12 +101,14 @@ export class TrafficManager {
     const mix: VehicleKind[] = [];
     for (let i = 0; i < POOL_TOTAL; i++) {
       const r = i / POOL_TOTAL;
-      if (r < 0.32) mix.push('sedan');
-      else if (r < 0.46) mix.push('coupe');
-      else if (r < 0.6) mix.push('taxi');
-      else if (r < 0.72) mix.push('boxTruck');
-      else if (r < 0.82) mix.push('flatbed');
-      else if (r < 0.92) mix.push('ambulance');
+      if (r < 0.22) mix.push('sedan');
+      else if (r < 0.34) mix.push('coupe');
+      else if (r < 0.44) mix.push('taxi');
+      else if (r < 0.58) mix.push('suv');
+      else if (r < 0.68) mix.push('van');
+      else if (r < 0.78) mix.push('boxTruck');
+      else if (r < 0.85) mix.push('flatbed');
+      else if (r < 0.93) mix.push('ambulance');
       else mix.push('bus');
     }
     for (let i = 0; i < POOL_TOTAL; i++) {
@@ -226,7 +228,7 @@ export class TrafficManager {
     const s = playerS + this.rng.range(250, 380);
     const kind = car.model.kind;
     let speedClass = 1;
-    if (kind === 'boxTruck' || kind === 'flatbed' || kind === 'bus') speedClass = 0;
+    if (kind === 'boxTruck' || kind === 'flatbed' || kind === 'bus' || kind === 'van') speedClass = 0;
     const sc = SPEED_CLASSES[speedClass];
     const v = ms(this.rng.range(sc.kmhMin, sc.kmhMax));
 

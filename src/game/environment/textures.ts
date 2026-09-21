@@ -90,20 +90,9 @@ export function roadTexture(): THREE.Texture {
     edge(W * 0.028, 9, '#e8e6dd'); // left
     edge(W * 0.965, 9, '#e8e6dd'); // right
 
-    // dashed lane dividers (5m dash / 7m gap => at 14m repeat: 2 dashes)
-    const laneXs = [W * 0.27, W * 0.5, W * 0.73];
-    ctx.fillStyle = '#dcdcd2';
-    for (const lx of laneXs) {
-      ctx.fillRect(lx - 5, H * 0.06, 10, H * 0.3);
-      ctx.fillRect(lx - 5, H * 0.56, 10, H * 0.3);
-    }
-    // wear on dashes
-    for (const lx of laneXs) {
-      for (let i = 0; i < 120; i++) {
-        ctx.fillStyle = 'rgba(38,40,43,0.55)';
-        ctx.fillRect(lx - 5 + rng.next() * 10, rng.next() * H, 2, 2 + rng.next() * 3);
-      }
-    }
+    // NOTE: dashed lane dividers are GEOMETRY now (chunkBuilder 'paint' bucket)
+    // so they align with actual lane boundaries on 3-6 lane sections — the
+    // texture carries only edge lines, wear bands, joints and grain.
 
     return tex(canvas, 1, 1);
   });

@@ -70,6 +70,14 @@ export class HighwayMaterials {
   );
   blinkRed = new THREE.MeshBasicMaterial({ color: 0xff2211 });
   blinkOrange = new THREE.MeshBasicMaterial({ color: 0xff8c1a });
+  /** geometric lane dashes (slightly emissive so headlights/ageing read) */
+  paint = new THREE.MeshStandardMaterial({ color: 0xd8d6c8, roughness: 0.6, metalness: 0.0, emissive: 0x55534a, emissiveIntensity: 0.12 });
+  /** continuous shoulder line */
+  paintEdge = new THREE.MeshStandardMaterial({ color: 0xe8e6d8, roughness: 0.62, metalness: 0.0, emissive: 0x55534a, emissiveIntensity: 0.1 });
+  /** reflector post body */
+  reflector = new THREE.MeshStandardMaterial({ color: 0xd8d8d4, roughness: 0.7, metalness: 0.1 });
+  /** reflector head (bright, catches headlights) */
+  reflectorHead = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0.0, emissive: 0xfff8e0, emissiveIntensity: 0.55 });
 
   dispose() {
     for (const m of [
@@ -86,6 +94,10 @@ export class HighwayMaterials {
       ...this.windows,
       this.blinkRed,
       this.blinkOrange,
+      this.paint,
+      this.paintEdge,
+      this.reflector,
+      this.reflectorHead,
     ])
       m.dispose();
   }
@@ -302,6 +314,25 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     push('concrete', along(box(slabW, 0.55, SAMPLE_STEP + 0.02), pt, slabCx, 0, -0.6));
   }
 
+  // ---------------- geometric lane markings (follow REAL lane boundaries) ----
+  // The asphalt texture carries only edge lines + wear; dashes are geometry so
+  // they stay aligned with laneX(s) on 3/4/5/6-lane sections and tapers.
+  for (let s = s0; s < s1 - 0.01; s += SAMPLE_STEP) {
+    spline.get(s, pt);
+    const lanes = spline.lanesAt(s + SAMPLE_STEP / 2);
+    for (let b = 1; b < lanes; b++) {
+      // boundary between lane b-1 and b at the segment MIDPOINT of this step
+      const xa = spline.laneX(s, b - 1);
+      const xb = spline.laneX(s, b);
+      const x = (xa + xb) / 2;
+      const g = box(0.14, 0.012, SAMPLE_STEP * 0.55);
+      push('paint', along(g, pt, x, 0.006, 0));
+    }
+    // right shoulder line hugging the outer barrier (worn white)
+    const edge = dHalf(s) + 0.28;
+    push('paintEdge', along(box(0.16, 0.012, SAMPLE_STEP + 0.02), pt, edge, 0.006, 0));
+  }
+
   // ---------------- median Jersey barrier + anti-glare slats ----------------
   push('concrete', barrierStrip(spline, s0, s1, () => -6.95, 1.1, 0.62));
   for (let s = s0 + 4; s < s1; s += 8) {
@@ -331,12 +362,16 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
   }
 
   // ---------------- streetlamps (right edge, staggered with left) ----------------
-  for (let s = s0 + 8; s < s1; s += 35) {
+  // GLOBAL uniform stations (s ≡ 8 mod 35 right, +17.5 left) so StreetLights'
+  // real PointLights land exactly on the visual lamp heads across chunk seams.
+  for (let ls = Math.ceil(s0 / 35) * 35 + 8; ls < s1; ls += 35) {
     for (const side of [1, -1]) {
-      const ls = s + (side === 1 ? 0 : 17.5);
-      if (ls >= s1) continue;
-      spline.get(ls, pt);
-      const edge = dHalf(ls) + 0.2;
+      const st = side === 1 ? ls : ls + 17.5;
+      if (st >= s1 || st < s0) continue;
+      if (spline.isBridgeAt(st)) continue; // suspension spans carry their own cable lighting
+      const s = st;
+      spline.get(s, pt);
+      const edge = dHalf(s) + 0.2;
       const lat = side === 1 ? edge : -7.1;
       push('darkMetal', along(cyl(0.09, 0.13, 10.5, 0, 0, 0, 6), pt, lat, 0, 5.25));
       push('darkMetal', along(box(2.6, 0.12, 0.14), pt, lat - side * 1.3, 0, 10.4));
@@ -347,6 +382,16 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
       pool.rotateX(-Math.PI / 2);
       push('lampPool', along(pool, pt, lat - side * 2.2, 0, 0.045));
     }
+  }
+
+  // ---------------- roadside reflector posts (night depth cue, §8) --------
+  // small white/amber posts at the shoulder every 20 m; emissive so they
+  // pop under headlights — cheap (4 tris each) and merges into one bucket
+  for (let s = Math.ceil(s0 / 20) * 20; s < s1; s += 20) {
+    spline.get(s, pt);
+    const edge = dHalf(s) + 0.75;
+    push('reflector', along(box(0.06, 0.75, 0.06), pt, edge, 0, 0.375));
+    push('reflectorHead', along(box(0.08, 0.08, 0.02), pt, edge, 0, 0.72));
   }
 
   // ---------------- viaduct support pillars (skipped on bridge) ----------------
@@ -564,6 +609,10 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     windows3: mats.windows[3],
     blinkRed: mats.blinkRed,
     blinkOrange: mats.blinkOrange,
+    paint: mats.paint,
+    paintEdge: mats.paintEdge,
+    reflector: mats.reflector,
+    reflectorHead: mats.reflectorHead,
   };
   for (const [bucket, list] of Object.entries(geos)) {
     const merged = BufferGeometryUtils.mergeGeometries(list, false);
