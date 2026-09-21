@@ -29,6 +29,8 @@ import { MotorcycleAudio } from '../vehicle/BikeAudio';
 import { DashboardDisplay } from '../vehicle/Dashboard';
 import { CameraController } from '../camera/CameraController';
 import { PostFX } from '../fx/PostFX';
+import { TrafficLights } from '../traffic/TrafficLights';
+import { StreetLights } from '../environment/StreetLights';
 import { clamp, damp, kmh } from './utils';
 import { Scoring, multiplierForCombo } from './Scoring';
 
@@ -196,6 +198,8 @@ export class GameManager {
 
   private tmpVel = new THREE.Vector3();
   private tmpFwd = new THREE.Vector3(0, 0, 1);
+  private trafficLights: TrafficLights;
+  private streetLights: StreetLights;
   private demoLyricCues: LyricCue[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private callbacks: GameCallbacks = {}) {
@@ -217,6 +221,8 @@ export class GameManager {
     this.biomes = new BiomeController(this.scene, this.highway, this.weather);
     this.biomes.buildPools();
     this.traffic = new TrafficManager(this.highway, this.scene);
+    this.trafficLights = new TrafficLights(this.scene);
+    this.streetLights = new StreetLights(this.scene);
     this.bike = new BikeController(this.highway, this.scene);
     this.cam = new CameraController(this.scene, window.innerWidth / Math.max(1, window.innerHeight));
     this.cam.attachMirrors(this.bike);
@@ -798,7 +804,7 @@ export class GameManager {
     let dt: number;
     const audioNow = this.dspClock.getAudioTime();
     if (this.dspClock.isRunning && Number.isFinite(audioNow)) {
-      dt = clamp(audioNow - this.lastAudioT, 0, 0.5);
+      dt = clamp(audioNow - this.lastAudioT, 0, 1.0);
       this.lastAudioT = audioNow;
     } else {
       // no timeline yet (boot/menu before first run): fall back to real time
@@ -898,9 +904,9 @@ export class GameManager {
 
       this.physicsAccum += dt;
       let steps = 0;
-      // step cap must cover the sim-dt clamp (0.5 s → 60 steps): a lower cap
+      // step cap must cover the sim-dt clamp (1.0 s → 120 steps): a lower cap
       // silently desyncs bike.s from the audio timeline at low frame rates.
-      while (this.physicsAccum >= PHYSICS_H && steps < 60) {
+      while (this.physicsAccum >= PHYSICS_H && steps < 120) {
         const stepEv = this.bike.step(PHYSICS_H, snap);
         ev = stepEv;
         this.physicsAccum -= PHYSICS_H;
@@ -908,7 +914,7 @@ export class GameManager {
         if (!frozen && stepEv.barrierHit) this.handleImpact();
         if (!frozen && this.traffic.collideAndScore(this.bike, PHYSICS_H)) break;
       }
-      if (steps === 60) this.physicsAccum = 0;
+      if (steps === 120) this.physicsAccum = 0;
 
       if (this.state === 'playing') {
         this.scoring.tick(dt);
@@ -968,6 +974,11 @@ export class GameManager {
     this.traffic.rainBoost = this.weather.rainAmount;
     this.biomes.update(dt, this.bike.s, this.bike.worldPos, this.cam.camera.position.y);
     this.weather.update(dt, this.bike.worldPos, this.tmpFwd, this.tmpVel, this.bike, this.traffic, this.highway, this.cam.camera);
+    // real dynamic lights (§7/§30): nearest traffic + streetlamp pools
+    this.trafficLights.intensity = this.weather.headlightsOn ? 1 : 0;
+    this.trafficLights.update(dt, this.bike.worldPos, this.traffic);
+    this.streetLights.intensity = this.weather.headlightsOn ? 1 : 0;
+    this.streetLights.update(dt, this.highway, this.bike.s);
 
     const tel = this.bike.telemetry();
     this.dashboard.update(dt, tel.rpm, tel.speedKmh, tel.gear, this.scoring.combo, tel.rpm > 14200 && this.input.throttle > 0.4);
@@ -1147,6 +1158,8 @@ export class GameManager {
     this.postfx.dispose();
     this.weather.dispose();
     this.biomes.dispose();
+    this.trafficLights.dispose();
+    this.streetLights.dispose();
     this.gates.dispose(this.scene);
     this.traffic.dispose(this.scene);
     this.scene.remove(this.bike.group);

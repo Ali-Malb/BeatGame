@@ -16,7 +16,6 @@
 import * as THREE from 'three';
 import { buildTrafficVehicle, buildOncomingCar, VehicleKind, VehicleModel } from './trafficModels';
 import { Highway } from '../environment/Highway';
-import { LANE_CENTERS } from '../environment/chunkBuilder';
 import { lerp, smoothstep, RNG, ms } from '../core/utils';
 import type { BikeController } from '../vehicle/BikeController';
 
@@ -231,13 +230,17 @@ export class TrafficManager {
     const sc = SPEED_CLASSES[speedClass];
     const v = ms(this.rng.range(sc.kmhMin, sc.kmhMax));
 
-    // preferred lanes: slow traffic keeps right, fast keeps left
+    // preferred lanes: slow traffic keeps right, fast keeps left (clamped to
+    // the road's CURRENT lane count — §15 variable width)
+    const lanes = this.highway.spline.lanesAt(s);
     let lanePrefs: number[];
     if (speedClass === 0) lanePrefs = [2, 3, 1];
     else lanePrefs = [0, 1, 2, 3];
+    lanePrefs = lanePrefs.filter((l) => l < lanes);
+    if (lanePrefs.length === 0) lanePrefs = [lanes - 1];
 
     for (const lane of lanePrefs) {
-      const x = LANE_CENTERS[lane];
+      const x = this.laneCenter(s, lane);
       // same-lane spacing: ±16 m window free (cars match speeds in-lane)
       let blocked = false;
       for (const other of this.pool) {
@@ -288,7 +291,6 @@ export class TrafficManager {
   // ------------------------------------------------------------------ update ----
   update(dt: number, playerS: number, playerV: number) {
     this.time += dt;
-    this.lastPlayerV = playerV;
     this.lastPlayerV = playerV;
 
     // ---- maintain population (15–25) ----
@@ -360,7 +362,7 @@ export class TrafficManager {
         if (wantsPass || drift) {
           const order = car.lane > 0 ? [car.lane - 1, car.lane + 1] : [car.lane + 1, car.lane - 1];
           for (const target of order) {
-            if (target < 0 || target > 3) continue;
+            if (target < 0 || target >= this.highway.spline.lanesAt(car.s)) continue;
             let clear = true;
             for (let aj = 0; aj < nActive; aj++) {
               const other = active[aj];
@@ -399,7 +401,7 @@ export class TrafficManager {
               car.laneFrom = car.lane;
               car.laneTo = target;
               car.laneWait = SIGNAL_SEC; // signal first
-              car.blinker = Math.sign(LANE_CENTERS[target] - LANE_CENTERS[car.lane]);
+              car.blinker = Math.sign(this.laneCenter(car.s, target) - this.laneCenter(car.s, car.lane));
               car.cooldown = this.rng.range(9, 22);
               break;
             }
@@ -413,8 +415,8 @@ export class TrafficManager {
         if (car.laneWait <= 0) car.laneT = 0.0001;
       } else if (car.laneT > 0) {
         car.laneT = Math.min(1, car.laneT + dt / LANE_CHANGE_SEC);
-        const from = LANE_CENTERS[car.laneFrom];
-        const to = LANE_CENTERS[car.laneTo];
+        const from = this.laneCenter(car.s, car.laneFrom);
+        const to = this.laneCenter(car.s, car.laneTo);
         car.x = lerp(from, to, smoothstep(car.laneT));
         if (car.laneT >= 1) {
           car.lane = car.laneTo;
@@ -422,7 +424,7 @@ export class TrafficManager {
           car.blinker = 0;
         }
       } else {
-        car.x = damp3(car.x, LANE_CENTERS[car.lane], 3, dt);
+        car.x = damp3(car.x, this.laneCenter(car.s, car.lane), 3, dt);
       }
 
       car.s += car.v * dt;
@@ -433,8 +435,8 @@ export class TrafficManager {
       g.position.set(p.x + p.rx * car.x, p.y, p.z + p.rz * car.x);
       g.rotation.y = p.yaw;
       g.rotation.z = -Math.atan(p.kappa * car.v * car.v * 0.02);
-      // lights
-      car.model.cones.visible = this.headlightsOn;
+      // lights — cone meshes REMOVED (§24): emissive lenses + pavement pools
+      // carry the night look; real PointLights come from TrafficLights
       car.model.headMat.color.setRGB(1.35, 1.3, 1.15);
       if (car.braking) {
         car.model.tailMat.color.setRGB(2.6, 0.14, 0.1); // 4× flare
@@ -482,6 +484,45 @@ export class TrafficManager {
       const p = this.highway.frame(oc.s);
       oc.group.position.set(p.x - p.rx * 11.0, p.y, p.z - p.rz * 11.0);
       oc.group.rotation.y = p.yaw + Math.PI;
+    }
+  }
+
+  /** physical lane center at s for a lane index (clamped to available lanes) */
+  private laneCenter(s: number, lane: number): number {
+    return this.highway.spline.laneX(s, lane);
+  }
+
+  /** nearest-lane migration when the road narrows under a car (§15) */
+  private pickMigrationLane(car: TrafficCar, lanes: number): number {
+    for (let t = lanes - 1; t >= 0; t--) {
+      if (t === car.lane) continue;
+      let clear = true;
+      for (const other of this.pool) {
+        if (!other.active || other === car) continue;
+        if (other.lane !== t && other.laneTo !== t) continue;
+        const ds = other.s - car.s;
+        if (ds > -14 && ds < 26) {
+          clear = false;
+          break;
+        }
+      }
+      if (clear) return t;
+    }
+    return -1;
+  }
+
+  /** iterate active cars with front/rear world anchors (consumed by TrafficLights) */
+  forEachActive(cb: (front: THREE.Vector3, back: THREE.Vector3, braking: boolean) => void): void {
+    for (const car of this.pool) {
+      if (!car.active) continue;
+      const p = this.highway.frame(car.s);
+      const rX = Math.cos(p.yaw);
+      const rZ = -Math.sin(p.yaw);
+      const fX = Math.sin(p.yaw);
+      const fZ = Math.cos(p.yaw);
+      _front.set(p.x + rX * car.x + fX * car.model.halfL, p.y + 0.7, p.z + rZ * car.x + fZ * car.model.halfL);
+      _back.set(p.x + rX * car.x - fX * car.model.halfL, p.y + 0.7, p.z + rZ * car.x - fZ * car.model.halfL);
+      cb(_front, _back, car.braking);
     }
   }
 
@@ -624,6 +665,21 @@ export class TrafficManager {
    * an immediate signaled lane change toward a clear lane.
    */
   private repairCorridors(playerS: number): void {
+    // ---- lane-count migration (road narrowing): outer lanes vanish, cars move in
+    for (const c of this.pool) {
+      if (!c.active || c.laneT > 0 || c.laneWait > 0) continue;
+      const lanes = this.highway.spline.lanesAt(c.s);
+      if (c.lane >= lanes) {
+        const target = this.pickMigrationLane(c, lanes);
+        if (target >= 0) {
+          c.laneFrom = c.lane;
+          c.laneTo = target;
+          c.laneWait = 0.25;
+          c.blinker = Math.sign(this.laneCenter(c.s, target) - this.laneCenter(c.s, c.lane));
+          c.cooldown = 8;
+        }
+      }
+    }
     for (let s = playerS + 20; s < playerS + 420; s += 12) {
       const occ = this.occupancyAt(s, WINDOW);
       for (let l = 0; l < 3; l++) {
@@ -673,7 +729,7 @@ export class TrafficManager {
               newest.laneFrom = newest.lane;
               newest.laneTo = target;
               newest.laneWait = 0.35; // brief signal (emergency correction)
-              newest.blinker = Math.sign(LANE_CENTERS[target] - LANE_CENTERS[newest.lane]);
+              newest.blinker = Math.sign(this.laneCenter(newest.s, target) - this.laneCenter(newest.s, newest.lane));
               newest.cooldown = 12;
               this.repairPushes++;
             } else if (rel > 90) {
@@ -717,3 +773,6 @@ export class TrafficManager {
 function damp3(cur: number, target: number, lambda: number, dt: number): number {
   return lerp(cur, target, 1 - Math.exp(-lambda * dt));
 }
+
+const _front = new THREE.Vector3();
+const _back = new THREE.Vector3();

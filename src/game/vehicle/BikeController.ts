@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { buildBike, BikeJoints } from '../models/bikeModel';
 import { RiderModel } from '../models/riderModel';
 import { Highway } from '../environment/Highway';
-import { LANE_CENTERS, JOINT_EVERY, DRIVE_HALF } from '../environment/chunkBuilder';
+import { JOINT_EVERY, DRIVE_HALF } from '../environment/chunkBuilder';
 import { BikePhysicsModel, MAX_LEAN, SHIFT_LIGHT, WHEEL_R } from './BikePhysicsModel';
 import { clamp, clampAbs, damp, kmh, smoothNoise } from '../core/utils';
 import type { InputSnapshot } from '../core/Input';
@@ -96,6 +96,8 @@ export class BikeController {
   worldYaw = 0;
   roadYaw = 0;
   pitch = 0;
+  /** §5 real brake light contribution (PointLight at the tail) */
+  brakeLight: THREE.PointLight;
 
   private road = { kappa: 0, slope: 0, driveHalf: DRIVE_HALF };
 
@@ -105,6 +107,10 @@ export class BikeController {
     this.joints = built.joints;
     this.rider = new RiderModel();
     this.joints.body.add(this.rider.group);
+    // §5: real brake light (small red PointLight at the tail)
+    this.brakeLight = new THREE.PointLight(0xff2014, 0, 9, 1.9);
+    this.brakeLight.position.set(0, 0.9, -0.95);
+    this.group.add(this.brakeLight);
     scene.add(this.group);
     this.lastJointS = Math.floor(this.model.s / JOINT_EVERY) * JOINT_EVERY;
   }
@@ -126,6 +132,7 @@ export class BikeController {
     const frame = this.highway.frame(this.model.s);
     this.road.kappa = frame.kappa;
     this.road.slope = frame.slope;
+    this.road.driveHalf = this.highway.spline.driveHalfAt(this.model.s);
     return this.model.step(dt, input, this.road, JOINT_EVERY);
   }
 
@@ -179,6 +186,12 @@ export class BikeController {
 
     // rider IK
     this.shiftBlip = Math.max(0, this.shiftBlip - dt);
+    // §5 brake light: emissive flare + real red light contribution while braking
+    const brake = clamp(-m.aLong / 3.5, 0, 1);
+    this.joints.taillightMat.color.setRGB(0.55 + 3.2 * brake, 0.05 + 0.03 * brake, 0.04);
+    if (this.brakeLight) {
+      this.brakeLight.intensity = brake > 0.08 ? 15 * brake : 0;
+    }
     const hb = this.hbYaw;
     const cy = Math.cos(hb);
     const sy = Math.sin(hb);
@@ -225,7 +238,7 @@ export class BikeController {
     this.crashTime += dt;
     m.v = Math.max(0, m.v - (m.v * 1.9 + 4) * dt);
     m.s += m.v * dt;
-    m.x = clampAbs(m.x + this.crashVx * dt, DRIVE_HALF - 0.5);
+    m.x = clampAbs(m.x + this.crashVx * dt, this.highway.spline.driveHalfAt(this.model.s) - 0.5);
     this.crashVx *= Math.exp(-1.2 * dt);
     const G = 9.81;
     this.crashVy -= G * dt;
@@ -259,7 +272,8 @@ export class BikeController {
     this.crashTime = 0;
     this.crashSpin.identity();
     this.crashY = 0;
-    this.model.respawnRolling(s, LANE_CENTERS[clamp(lane, 0, 3)], 4);
+    const lanes = this.highway.spline.lanesAt(s);
+    this.model.respawnRolling(s, this.highway.spline.laneX(s, clamp(lane, 0, lanes - 1)), 4);
     this.group.quaternion.setFromEuler(_crashE.set(0, 0, 0));
     this.lastJointS = Math.floor(this.model.s / JOINT_EVERY) * JOINT_EVERY;
   }

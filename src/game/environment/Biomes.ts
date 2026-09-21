@@ -272,8 +272,8 @@ export class BiomeController {
     };
     place('tower', wantTowers ? 24 : 0, -80, 620, 22, 70);
     place('pylon', wantPylons ? 8 : 0, -40, 600, 0, 0);
-    place('pine', wantPines ? 14 : 0, -60, 620, 10, 40);
-    place('tree', wantTrees ? 12 : 0, -60, 620, 8, 26);
+    place('pine', wantPines ? 14 : 0, -60, 620, 15, 42);
+    place('tree', wantTrees ? 12 : 0, -60, 620, 14, 28);
     place('turbine', wantTurbines ? 5 : 0, 60, 620, 55, 110);
 
     // blossom glow visibility + petals
@@ -305,8 +305,8 @@ export class BiomeController {
         it.side = side;
         const kindRange: Record<SceneryItem['kind'], [number, number]> = {
           tower: [22, 70],
-          pine: [10, 40],
-          tree: [8, 26],
+          pine: [15, 42],
+          tree: [14, 28],
           turbine: [55, 110],
           pylon: [0, 0],
           cable: [0, 0],

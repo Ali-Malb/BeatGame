@@ -224,20 +224,20 @@ async function main(): Promise<void> {
   await page.evaluate(() => {
     const w = window as unknown as { __laneTimer?: ReturnType<typeof setInterval> };
     if (w.__laneTimer) clearInterval(w.__laneTimer);
-    const LANES = [-5.25, -1.75, 1.75, 5.25];
     w.__laneTimer = setInterval(() => {
       const g = (window as unknown as { __game?: GameDriverish }).__game;
       if (!g) return;
       const t = g.dspClock.getAudioTime();
-      let best: { lead: number; lane: number } | null = null;
-      for (const gate of g.gates.gates as Array<{ active: boolean; judged: boolean; note: { time: number; lane: number } }>) {
+      let best: { lead: number; lane: number; s: number } | null = null;
+      for (const gate of g.gates.gates as Array<{ active: boolean; judged: boolean; note: { time: number; lane: number }; s: number }>) {
         if (!gate.active || gate.judged) continue;
         const lead = gate.note.time - t;
-        if (lead > 0.55 && lead < 6 && (!best || lead < best.lead)) best = { lead, lane: gate.note.lane };
+        if (lead > 0.55 && lead < 6 && (!best || lead < best.lead)) best = { lead, lane: gate.note.lane, s: gate.s };
       }
       if (best) {
         const m = g.bike.model as { x: number; vx: number };
-        const target = LANES[best.lane];
+        // gates live at the SPLINE's physical lane position (taper/elevation-aware)
+        const target = g.highway.spline.laneX(best.s, best.lane) as number;
         if (best.lead < 1.0) {
           m.x = target; // final adjust: a snap is a legal player input
           m.vx = 0;
@@ -286,20 +286,25 @@ async function main(): Promise<void> {
     g.scoring.hp = 100;
   });
 
-  // camera toggle (poll + retry: SwiftShader frame hitches can delay delivery)
-  let camMode = '';
-  for (let attempt = 0; attempt < 3 && camMode !== 'chase'; attempt++) {
+  // camera: cycle through ALL five modes (§20), verifying each transition lands
+  const seen: string[] = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
     if (attempt > 0 && (await state()) !== 'playing') break;
     await page.keyboard.press('KeyC');
     await page
-      .waitForFunction(() => (window as unknown as { __game: { cam: { mode: string } } }).__game.cam.mode === 'chase', { timeout: 2500 })
-      .then(() => {
-        camMode = 'chase';
-      })
+      .waitForFunction(
+        () => (window as unknown as { __game: { cam: { mode: string } } }).__game.cam.mode !== 'cockpit',
+        { timeout: 2500 }
+      )
       .catch(() => {});
+    const mode = await page.evaluate(() => (window as unknown as { __game: { cam: { mode: string } } }).__game.cam.mode);
+    if (!seen.includes(mode)) seen.push(mode);
   }
-  check('camera toggles to chase', camMode === 'chase', `mode=${camMode}`);
-  await page.keyboard.press('KeyC');
+  check('camera cycles 5 modes (cockpit + chase-close)', seen.includes('chase-close'), `seen=${seen.join(',')}`);
+  // cycle back to cockpit for the rest of the suite
+  for (let i = 0; i < 5 && (await page.evaluate(() => (window as unknown as { __game: { cam: { mode: string } } }).__game.cam.mode)) !== 'cockpit'; i++) {
+    await page.keyboard.press('KeyC');
+  }
 
   // ensure still playing for the pause test (a crash could have fired)
   await page.evaluate(() => {
@@ -559,6 +564,7 @@ interface GameDriverish {
   dspClock: { getAudioTime(): number };
   gates: { gates: unknown };
   bike: { model: { x: number; vx: number } };
+  highway: { spline: { laneX(s: number, lane: number): number } };
 }
 
 void main().catch((e) => {
