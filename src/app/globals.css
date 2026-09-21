@@ -122,6 +122,13 @@
 }
 
 /* near-miss / sync popup: float up ≈10px and fade over 0.6 s (§32) */
+@keyframes cam-fade {
+  0% { opacity: 0; transform: translate(-50%, 6px); }
+  12% { opacity: 1; transform: translate(-50%, 0); }
+  70% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(-50%, -8px); }
+}
+
 @keyframes popupFloat {
   0% {
     transform: translateY(0) scale(1);

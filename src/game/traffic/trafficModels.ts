@@ -20,7 +20,6 @@ export interface VehicleModel {
   headMat: THREE.MeshBasicMaterial;
   tailMat: THREE.MeshBasicMaterial;
   blinkerMat: THREE.MeshBasicMaterial;
-  cones: THREE.Mesh; // additive headlight cones (night/rain)
   glowMesh: THREE.Mesh; // additive glow quads
   heavy: boolean;
   kind: VehicleKind;
@@ -225,26 +224,9 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
   group.add(glowMesh);
   for (const g of glowGeos) g.dispose();
 
-  // ---- night headlight cones ----
-  const coneMat = new THREE.MeshBasicMaterial({
-    color: 0xfff0c8,
-    transparent: true,
-    opacity: 0.06,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-  const coneGeos: THREE.BufferGeometry[] = [];
-  for (const x of [-halfW + 0.28, halfW - 0.28]) {
-    const c = new THREE.CylinderGeometry(0.22, 1.6, 7, 10, 1, true);
-    c.rotateX(-Math.PI / 2);
-    c.translate(x, hy, halfL + 3.4);
-    coneGeos.push(c);
-  }
-  const cones = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(coneGeos, false)!, coneMat);
-  cones.visible = false;
-  group.add(cones);
-  for (const g of coneGeos) g.dispose();
+  // ---- night headlight cones REMOVED (§24): crude cone geometry is replaced by
+  // the additive pavement pools below (headPool/brakePool) + shared real
+  // PointLights contributed by TrafficLights, which illuminate actual surfaces.
 
   // ---- pavement light pools: headlights actually illuminate the road ----
   const headPoolMat = new THREE.MeshBasicMaterial({
@@ -296,7 +278,6 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
     headMat,
     tailMat,
     blinkerMat,
-    cones,
     glowMesh,
     heavy,
     kind,

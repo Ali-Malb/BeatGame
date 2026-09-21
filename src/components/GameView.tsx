@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GameManager, type GameState, type Telemetry } from '@/game/core/Game';
+import { CAMERA_MODE_NAMES, type CameraMode } from '@/game/camera/CameraController';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame } from 'lucide-react';
@@ -87,6 +88,9 @@ export default function GameView() {
   const gameRef = useRef<GameManager | null>(null);
   const [tel, setTel] = useState<Telemetry>(EMPTY_TELEMETRY);
   const [state, setState] = useState<GameState>('menu');
+  // §21: brief camera-name indicator state (see useEffect below)
+  const [camLabel, setCamLabel] = useState<{ text: string; key: number } | null>(null);
+  const camModeRef = useRef(tel.cameraMode);
   const [popups, setPopups] = useState<Popup[]>([]);
   const [volume, setVolume] = useState(0.9);
   const [musicOn, setMusicOn] = useState(true);
@@ -99,6 +103,14 @@ export default function GameView() {
   const [analysisInfo, setAnalysisInfo] = useState<{ bpm: number; duration: number; sections: number; quality: string; notes: number } | null>(null);
   const [judgment, setJudgment] = useState<{ text: string; kind: string; id: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // §21: brief camera-name indicator when the mode changes
+  useEffect(() => {
+    if (tel.cameraMode !== camModeRef.current) {
+      camModeRef.current = tel.cameraMode;
+      setCamLabel({ text: CAMERA_MODE_NAMES[tel.cameraMode as CameraMode] ?? tel.cameraMode.toUpperCase(), key: Date.now() });
+    }
+  }, [tel.cameraMode]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -266,7 +278,7 @@ export default function GameView() {
               <span className="text-cyan-200/60">{tel.biome}</span>
             </div>
             <div className="mt-1">{tel.debug.distanceKm.toFixed(1)} km · {tel.debug.nearMisses} near-miss · {tel.perfects}P {tel.goods}G {tel.misses}M</div>
-            {tel.cameraMode === 'chase' && (
+            {tel.cameraMode !== 'cockpit' && (
               <div className="mt-1 font-mono text-3xl font-bold tabular-nums text-white/90">{Math.round(tel.speedKmh)} <span className="text-xs text-white/50">KM/H</span></div>
             )}
           </div>
@@ -275,6 +287,17 @@ export default function GameView() {
           <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 font-mono text-[10px] tracking-[0.35em] text-white/35">
             {tel.section.toUpperCase()} · {Math.round(tel.bpm)} BPM
           </div>
+
+          {/* camera mode indicator — fades quickly (§21) */}
+          {camLabel && (
+            <div
+              key={camLabel.key}
+              className="pointer-events-none absolute left-1/2 top-[16%] -translate-x-1/2 font-mono text-sm font-bold tracking-[0.45em] text-cyan-100/90 drop-shadow-[0_0_12px_rgba(80,200,255,0.5)]"
+              style={{ animation: 'cam-fade 1.6s ease-out forwards' }}
+            >
+              {camLabel.text}
+            </div>
+          )}
 
           {/* COUNTDOWN */}
           {state === 'countdown' && tel.countdown != null && (

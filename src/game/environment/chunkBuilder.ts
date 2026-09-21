@@ -1,8 +1,13 @@
 /**
- * ChunkBuilder — constructs one 100 m stretch of the elevated expressway as a
- * handful of merged meshes (asphalt / concrete / emissive / additive glow).
- * Shared materials live in HighwayMaterials so the weather controller can tweak
- * the whole world at once (wet asphalt, lamp intensity, window emission...).
+ * ChunkBuilder — constructs one 100 m stretch of the expressway as a handful of
+ * merged meshes (asphalt / concrete / emissive / additive glow). Shared materials
+ * live in HighwayMaterials so the weather controller can tweak the whole world
+ * at once (wet asphalt, lamp intensity, window emission...).
+ *
+ * Geometry is LANE-AWARE: the deck, barriers, skirts and pillars follow
+ * spline.driveHalfAt(s), so the road physically widens 3→6 lanes and narrows
+ * back. Tunnel zones get a full bore: roof, portal frames, interior lamps and
+ * darker ambient handled by the biome controller.
  */
 
 import * as THREE from 'three';
@@ -13,10 +18,11 @@ import { RNG, clamp } from '../core/utils';
 
 export const CHUNK_LEN = 100;
 
+/** legacy constants kept for compatibility (actual geometry queries the spline) */
 export const LANES = 4;
 export const LANE_W = 3.5;
 export const LANE_CENTERS = [-5.25, -1.75, 1.75, 5.25];
-export const DRIVE_HALF = 6.55; // inner faces of barriers
+export const DRIVE_HALF = 6.55;
 /** joint spacing for suspension clatter / audio thumps (bridge expansion joints) */
 export const JOINT_EVERY = 60;
 
@@ -130,8 +136,8 @@ function along(g: THREE.BufferGeometry, p: P3, lateral: number, forward: number,
   return alongR(g, p.x, p.y, p.z, p.yaw, lateral, forward, lift);
 }
 
-/** deck surface strip between two lateral bounds; u across, v = s / vRepeatMeters */
-function deckStrip(spline: RoadSpline, s0: number, s1: number, latMin: number, latMax: number, vRepeatMeters: number): THREE.BufferGeometry {
+/** deck surface strip between two lateral bounds (lateral now = fn(s) for variable width) */
+function deckStrip(spline: RoadSpline, s0: number, s1: number, latMin: (s: number) => number, latMax: (s: number) => number, vRepeatMeters: number): THREE.BufferGeometry {
   const pos: number[] = [];
   const uvs: number[] = [];
   const idx: number[] = [];
@@ -143,8 +149,10 @@ function deckStrip(spline: RoadSpline, s0: number, s1: number, latMin: number, l
     spline.get(s, pt);
     const rX = Math.cos(pt.yaw);
     const rZ = -Math.sin(pt.yaw);
-    pos.push(pt.x + rX * latMin, pt.y, pt.z + rZ * latMin);
-    pos.push(pt.x + rX * latMax, pt.y, pt.z + rZ * latMax);
+    const lMin = latMin(s);
+    const lMax = latMax(s);
+    pos.push(pt.x + rX * lMin, pt.y, pt.z + rZ * lMin);
+    pos.push(pt.x + rX * lMax, pt.y, pt.z + rZ * lMax);
     const v = s / vRepeatMeters;
     uvs.push(0, v, 1, v);
   }
@@ -161,8 +169,38 @@ function deckStrip(spline: RoadSpline, s0: number, s1: number, latMin: number, l
   return g;
 }
 
-/** extruded wall following the road (barriers) */
-function barrierStrip(spline: RoadSpline, s0: number, s1: number, lateral: number, height: number, thickness: number, caps = true): THREE.BufferGeometry {
+/** flat ground-level strip parallel to the spline (service roads below the deck) */
+function groundStrip(spline: RoadSpline, s0: number, s1: number, latMin: number, latMax: number): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const uvs: number[] = [];
+  const idx: number[] = [];
+  const n = Math.max(2, Math.round((s1 - s0) / SAMPLE_STEP) + 1);
+  const step = (s1 - s0) / (n - 1);
+  const pt = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
+  for (let i = 0; i < n; i++) {
+    const s = s0 + i * step;
+    spline.get(s, pt);
+    const rX = Math.cos(pt.yaw);
+    const rZ = -Math.sin(pt.yaw);
+    pos.push(pt.x + rX * latMin, 0.08, pt.z + rZ * latMin);
+    pos.push(pt.x + rX * latMax, 0.08, pt.z + rZ * latMax);
+    const v = s / 18;
+    uvs.push(0, v, 1, v);
+  }
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * 2;
+    idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** extruded wall following the road (barriers) at a per-s lateral offset */
+function barrierStrip(spline: RoadSpline, s0: number, s1: number, lateralFn: (s: number) => number, height: number, thickness: number, caps = true): THREE.BufferGeometry {
   const geos: THREE.BufferGeometry[] = [];
   const pt = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
   const n = Math.max(2, Math.round((s1 - s0) / SAMPLE_STEP) + 1);
@@ -173,6 +211,7 @@ function barrierStrip(spline: RoadSpline, s0: number, s1: number, lateral: numbe
   for (let i = 0; i < n; i++) {
     const s = s0 + i * step;
     spline.get(s, pt);
+    const lateral = lateralFn(s);
     const rX = Math.cos(pt.yaw);
     const rZ = -Math.sin(pt.yaw);
     const cx = pt.x + rX * lateral;
@@ -233,61 +272,77 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
   };
 
   const isBridge = spline.isBridgeAt(s0 + CHUNK_LEN / 2);
+  const isTunnel = spline.isTunnelAt(s0 + CHUNK_LEN / 2);
   const bridge = spline.bridgeRange();
   const pt = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
-  spline.get(s0 + CHUNK_LEN / 2, pt);
+
+  // ---- lateral bounds as functions of s (lane-aware width) ----
+  const dHalf = (s: number) => spline.driveHalfAt(s);
+  const latMaxD = (s: number) => dHalf(s) + 0.75; // asphalt slightly under barrier
+  const latMinD = (s: number) => -7.3; // median-side edge fixed
 
   // ---------------- deck surfaces ----------------
-  push('asphalt', deckStrip(spline, s0, s1, -7.3, 7.3, 14));
-  push('asphaltOnc', deckStrip(spline, s0, s1, -14.6, -7.3, 18));
+  push('asphalt', deckStrip(spline, s0, s1, latMinD, latMaxD, 14));
+  push('asphaltOnc', deckStrip(spline, s0, s1, () => -14.6, () => -7.3, 18));
 
-  // deck skirts + underside slab
+  // ground-level service road under the viaduct (§11 multi-level world): a
+  // dark ribbon at y≈0 following the spline's plan shape, visible wherever the
+  // deck is elevated — reads as a real road network below the highway
+  push('asphaltOnc', groundStrip(spline, s0, s1, 9.5, 24));
+  push('asphaltOnc', groundStrip(spline, s0, s1, -34, -19));
+
+  // deck skirts + underside slab (right edge follows variable width)
   for (let s = s0; s < s1 - 0.01; s += SAMPLE_STEP) {
     spline.get(s, pt);
-    push('concrete', along(box(0.35, 0.85, SAMPLE_STEP + 0.02), pt, 7.45, 0, -0.42));
+    const half = dHalf(s);
+    push('concrete', along(box(0.35, 0.85, SAMPLE_STEP + 0.02), pt, half + 0.15, 0, -0.42));
     push('concrete', along(box(0.35, 0.85, SAMPLE_STEP + 0.02), pt, -14.75, 0, -0.42));
-    push('concrete', along(box(22.4, 0.55, SAMPLE_STEP + 0.02), pt, -3.6, 0, -0.6));
+    const slabW = half + 15.4; // from -15.4ish to right edge
+    const slabCx = (half + 0.4 - 15.4) / 2;
+    push('concrete', along(box(slabW, 0.55, SAMPLE_STEP + 0.02), pt, slabCx, 0, -0.6));
   }
 
   // ---------------- median Jersey barrier + anti-glare slats ----------------
-  push('concrete', barrierStrip(spline, s0, s1, -6.95, 1.1, 0.62));
+  push('concrete', barrierStrip(spline, s0, s1, () => -6.95, 1.1, 0.62));
   for (let s = s0 + 4; s < s1; s += 8) {
     spline.get(s, pt);
     push('darkMetal', along(box(0.34, 0.62, 0.12), pt, -6.95, 0, 1.35));
   }
 
   // ---------------- outer wall + railing + acoustic panels ----------------
-  push('concrete', barrierStrip(spline, s0, s1, 6.95, 0.95, 0.55, false));
+  push('concrete', barrierStrip(spline, s0, s1, (s) => dHalf(s) + 0.4, 0.95, 0.55, false));
   for (let s = s0 + 2; s < s1; s += 4) {
     spline.get(s, pt);
-    push('railing', along(box(0.16, 0.1, 3.9), pt, 6.98, 0, 1.28));
-    push('railing', along(box(0.1, 0.42, 0.1), pt, 6.98, 0, 1.05));
+    const edge = dHalf(s) + 0.4;
+    push('railing', along(box(0.16, 0.1, 3.9), pt, edge + 0.03, 0, 1.28));
+    push('railing', along(box(0.1, 0.42, 0.1), pt, edge + 0.03, 0, 1.05));
   }
-  if (rng.next() < 0.35 && !isBridge) {
+  if (rng.next() < 0.35 && !isBridge && !isTunnel) {
     const panelLen = rng.range(40, 90);
     const ps = s0 + rng.range(0, 60);
     const pe = Math.min(s1, ps + panelLen);
     if (pe - ps > 10) {
-      push('darkMetal', barrierStrip(spline, ps, pe, 7.15, 4.2, 0.18, false));
+      push('darkMetal', barrierStrip(spline, ps, pe, (s) => dHalf(s) + 0.6, 4.2, 0.18, false));
       for (let s = ps; s < pe; s += 6) {
         spline.get(s, pt);
-        push('railing', along(box(0.22, 4.0, 0.26), pt, 7.15, 0, 2.9));
+        push('railing', along(box(0.22, 4.0, 0.26), pt, dHalf(s) + 0.6, 0, 2.9));
       }
     }
   }
 
-  // ---------------- streetlamps (both edges, staggered 17.5 m) ----------------
+  // ---------------- streetlamps (right edge, staggered with left) ----------------
   for (let s = s0 + 8; s < s1; s += 35) {
     for (const side of [1, -1]) {
       const ls = s + (side === 1 ? 0 : 17.5);
       if (ls >= s1) continue;
       spline.get(ls, pt);
-      const lat = side === 1 ? 7.05 : -7.1;
+      const edge = dHalf(ls) + 0.2;
+      const lat = side === 1 ? edge : -7.1;
       push('darkMetal', along(cyl(0.09, 0.13, 10.5, 0, 0, 0, 6), pt, lat, 0, 5.25));
       push('darkMetal', along(box(2.6, 0.12, 0.14), pt, lat - side * 1.3, 0, 10.4));
       push('lampHead', along(box(0.72, 0.16, 0.3), pt, lat - side * 2.55, 0, 10.3));
-      // fake volumetric cone + light pool
-      push('lampCone', along(cyl(0.18, 3.6, 9.4, 0, 0, 0, 12), pt, lat - side * 2.55, 0, 5.5));
+      // NO cone geometry: the additive ground pool below does the visual work,
+      // a REAL PointLight is contributed by the nearby-light pool (§24)
       const pool = new THREE.PlaneGeometry(7.5, 9.5);
       pool.rotateX(-Math.PI / 2);
       push('lampPool', along(pool, pt, lat - side * 2.2, 0, 0.045));
@@ -299,13 +354,52 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     for (let s = s0 + 12; s < s1; s += 35) {
       spline.get(s, pt);
       const h = pt.y - 0.4;
-      push('concrete', along(cyl(1.5, 1.9, h, 0, 0, 0, 10), pt, -3.6, 0, -h / 2));
-      push('concrete', along(box(4.2, 1.0, 3.4), pt, -3.6, 0, -1.2));
+      const cx = (dHalf(s) + 0.4 - 15.4) / 2;
+      push('concrete', along(cyl(1.5, 1.9, h, 0, 0, 0, 10), pt, cx, 0, -h / 2));
+      push('concrete', along(box(4.2, 1.0, 3.4), pt, cx, 0, -1.2));
     }
   }
 
-  // ---------------- sign gantries (§18: every 200–350 m) ----------------
-  if (s0 % 300 < CHUNK_LEN && rng.next() < 0.92) {
+  // ---------------- tunnel bore ----------------
+  if (isTunnel) {
+    // portal frame at the entry (thick face + sign band)
+    const entryS = spline.tunnelRangesUpTo(s1).find((t) => s0 < t.end && t.end < s1 || (t.start <= s0 && t.end >= s0));
+    const tStart = entryS ? entryS.start : s0;
+    if (s0 - tStart < CHUNK_LEN) {
+      // portal face: arch approximated by a rectangular frame
+      spline.get(Math.max(s0, tStart) + 0.5, pt);
+      const half = dHalf(pt.s) + 0.8;
+      push('concrete', along(box(half * 2 + 3, 2.2, 2.6), pt, 0, 0, 7.2));
+      for (const side of [-1, 1]) {
+        push('concrete', along(box(2.4, 8.6, 2.6), pt, side * (half + 1.1), 0, 4.1));
+      }
+    }
+    // interior: ceiling slab + side walls + wall lamps
+    for (let s = s0; s < s1 - 0.01; s += SAMPLE_STEP) {
+      spline.get(s, pt);
+      const half = dHalf(s) + 1.2;
+      // ceiling
+      push('concrete', along(box(half * 2 + 2.4, 0.7, SAMPLE_STEP + 0.02), pt, 0, 0, 7.6));
+      // walls
+      for (const side of [-1, 1]) {
+        push('concrete', along(box(0.7, 8.0, SAMPLE_STEP + 0.02), pt, side * half, 0, 3.6));
+      }
+    }
+    // wall lamps every 10 m (emissive heads + additive pools brighten the deck)
+    for (let s = s0 + 5; s < s1; s += 10) {
+      spline.get(s, pt);
+      for (const side of [-1, 1]) {
+        const half = dHalf(s) + 0.9;
+        push('lampHead', along(box(0.5, 0.16, 0.24), pt, side * half, 0, 5.4));
+        const pool = new THREE.PlaneGeometry(6.5, 8);
+        pool.rotateX(-Math.PI / 2);
+        push('lampPool', along(pool, pt, side * (dHalf(s) - 1.6), 0, 0.05));
+      }
+    }
+  }
+
+  // ---------------- sign gantries (every 200–350 m) ----------------
+  if (s0 % 300 < CHUNK_LEN && rng.next() < 0.92 && !isTunnel) {
     const gs = s0 + 55;
     spline.get(gs, pt);
     for (const lat of [-7.7, 7.7]) {
@@ -342,7 +436,7 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     for (const side of [-4.6, 4.6]) {
       push('concrete', alongR(box(0.2, 1.05, 33), cx, pt.y + deckY + 1.0, cz, yaw, side, 0, 0));
     }
-    // pillars land outside the full 22 m deck
+    // pillars land outside the full deck
     for (const sgn of [-1, 1]) {
       for (const zf of [-8, 8]) {
         const h = pt.y + deckY - 1.5;
@@ -398,54 +492,54 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
         }
       }
     }
-    // orange rails along bridge edges
+    // orange rails along bridge edges (follow variable width on the right)
     for (let s = s0; s < s1 - 0.01; s += SAMPLE_STEP) {
       spline.get(s, pt);
-      push('bridgePaint', along(box(0.18, 0.5, SAMPLE_STEP + 0.02), pt, 7.12, 0, 1.25));
+      push('bridgePaint', along(box(0.18, 0.5, SAMPLE_STEP + 0.02), pt, dHalf(s) + 0.55, 0, 1.25));
       push('bridgePaint', along(box(0.18, 0.5, SAMPLE_STEP + 0.02), pt, -7.12, 0, 1.25));
     }
   }
 
   // ---------------- skyline buildings ----------------
-  const variant = rng.int(0, 3);
-  for (const side of [-1, 1]) {
-    const count = rng.int(3, 6);
-    for (let b = 0; b < count; b++) {
-      const s = s0 + rng.range(0, CHUNK_LEN);
-      spline.get(s, pt);
-      const dist = rng.range(34, 130) * side;
-      const w = rng.range(16, 42);
-      const d = rng.range(16, 42);
-      const h = rng.range(28, 175) * (side === 1 ? 1 : 0.8);
-      const lat = dist + (side === 1 ? 14 : -14);
-      push(`windows${variant}`, along(buildingBox(w, h, d), pt, lat, 0, h / 2 - pt.y));
+  if (!isTunnel) {
+    const variant = rng.int(0, 3);
+    for (const side of [-1, 1]) {
+      const count = rng.int(3, 6);
+      for (let b = 0; b < count; b++) {
+        const s = s0 + rng.range(0, CHUNK_LEN);
+        spline.get(s, pt);
+        const dist = rng.range(34, 130) * side;
+        const w = rng.range(16, 42);
+        const d = rng.range(16, 42);
+        const h = rng.range(28, 175) * (side === 1 ? 1 : 0.8);
+        const lat = dist + (side === 1 ? 14 : -14);
+        push(`windows${variant}`, along(buildingBox(w, h, d), pt, lat, 0, h / 2 - pt.y));
 
-      // Break the skyline silhouette with occasional stepped penthouses and
-      // mechanical roofs; all geometry still merges into the chunk bucket.
-      const roofChance = h > 110 ? 0.72 : 0.34;
-      if (rng.next() < roofChance) {
-        const roofH = rng.range(4, Math.min(15, h * 0.12));
-        const roofW = w * rng.range(0.48, 0.78);
-        const roofD = d * rng.range(0.48, 0.78);
-        push('darkMetal', along(box(roofW, roofH, roofD), pt, lat, 0, h - pt.y + roofH * 0.5));
-        if (rng.next() < 0.55) {
-          push('darkMetal', along(box(roofW * 0.18, roofH * 0.7, roofD * 0.18), pt, lat + rng.range(-roofW * 0.2, roofW * 0.2), 0, h - pt.y + roofH + roofH * 0.35));
+        const roofChance = h > 110 ? 0.72 : 0.34;
+        if (rng.next() < roofChance) {
+          const roofH = rng.range(4, Math.min(15, h * 0.12));
+          const roofW = w * rng.range(0.48, 0.78);
+          const roofD = d * rng.range(0.48, 0.78);
+          push('darkMetal', along(box(roofW, roofH, roofD), pt, lat, 0, h - pt.y + roofH * 0.5));
+          if (rng.next() < 0.55) {
+            push('darkMetal', along(box(roofW * 0.18, roofH * 0.7, roofD * 0.18), pt, lat + rng.range(-roofW * 0.2, roofW * 0.2), 0, h - pt.y + roofH + roofH * 0.35));
+          }
+        }
+        if (h > 120) {
+          push('darkMetal', along(box(w * 0.4, 3.5, d * 0.4), pt, lat, 0, h - pt.y + 1.75));
+          push('blinkRed', along(new THREE.SphereGeometry(0.55, 8, 6), pt, lat, 0, h - pt.y + 3.9));
         }
       }
-      if (h > 120) {
-        push('darkMetal', along(box(w * 0.4, 3.5, d * 0.4), pt, lat, 0, h - pt.y + 1.75));
-        push('blinkRed', along(new THREE.SphereGeometry(0.55, 8, 6), pt, lat, 0, h - pt.y + 3.9));
+      if (rng.next() < 0.16) {
+        const s = s0 + rng.range(0, CHUNK_LEN);
+        spline.get(s, pt);
+        const lat = rng.range(48, 95) * side;
+        push('darkMetal', along(box(3.0, 62, 3.0), pt, lat, 0, 24 - pt.y));
+        push('darkMetal', along(box(48, 2.4, 2.4), pt, lat, 0, 46 - pt.y));
+        push('darkMetal', along(box(13, 2.0, 2.0), pt, lat - 9 * side, 0, 45.5 - pt.y));
+        push('darkMetal', along(box(2.6, 2.6, 3.4), pt, lat - 9 * side, 0, 43.5 - pt.y));
+        push('blinkRed', along(new THREE.SphereGeometry(0.6, 8, 6), pt, lat, 0, 55 - pt.y));
       }
-    }
-    if (rng.next() < 0.16) {
-      const s = s0 + rng.range(0, CHUNK_LEN);
-      spline.get(s, pt);
-      const lat = rng.range(48, 95) * side;
-      push('darkMetal', along(box(3.0, 62, 3.0), pt, lat, 0, 24 - pt.y));
-      push('darkMetal', along(box(48, 2.4, 2.4), pt, lat, 0, 46 - pt.y));
-      push('darkMetal', along(box(13, 2.0, 2.0), pt, lat - 9 * side, 0, 45.5 - pt.y));
-      push('darkMetal', along(box(2.6, 2.6, 3.4), pt, lat - 9 * side, 0, 43.5 - pt.y));
-      push('blinkRed', along(new THREE.SphereGeometry(0.6, 8, 6), pt, lat, 0, 55 - pt.y));
     }
   }
 

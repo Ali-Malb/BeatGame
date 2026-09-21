@@ -23,7 +23,6 @@
 import * as THREE from 'three';
 import type { Highway } from '../environment/Highway';
 import type { RhythmChart, ChartNote } from './RhythmChart';
-import { LANE_CENTERS } from '../environment/chunkBuilder';
 import { clamp, damp } from '../core/utils';
 
 export type GateJudgment = 'perfect' | 'good' | 'miss';
@@ -157,7 +156,7 @@ export class RhythmGates {
   private frameScratch = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
   private tmpColor = new THREE.Color();
 
-  stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0 };
+  stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0, recent: [] as number[] };
 
   constructor(scene: THREE.Scene, private highway: Highway) {
     // ---- shared geometries ----
@@ -243,13 +242,17 @@ export class RhythmGates {
     }
     this.lastScheduled = audioTime;
     this.chartIndex = 0;
-    this.stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0 };
+    this.stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0, recent: [] as number[] };
   }
 
   /** consume judgment events for the UI/scoring (drained inside update) */
   private pending: GateEvent[] = [];
 
   update(dt: number, audioNow: number, bikeS: number, bikeV: number, bikeX: number): GateEvent[] {
+    // seed the velocity estimate on first contact so the first reconciliations
+    // don't place gates at bikeS + 0 (measured: cold-start predV=0 bulldozed
+    // the opening gates and burned the miss budget before the run even formed)
+    if (this.predV <= 0 && bikeV > 2) this.predV = bikeV;
     this.predV = damp(this.predV, bikeV, 6, dt);
     this.pending.length = 0;
     const chart = this.chart;
@@ -271,24 +274,23 @@ export class RhythmGates {
         if (!g.active) continue;
         const note = g.note;
 
-        if (!g.locked) {
+        if (!g.judged) {
+          // CONTINUOUS ideal reconciliation (§39): while the note is in the
+          // future the gate sits at bikeS + v·lead — exactly where the bike
+          // will be at note.time if it holds speed. Exact under acceleration,
+          // braking and at any frame rate; a locked/snap approach bakes in a
+          // stale speed and makes every crossing late by the acceleration
+          // integral (measured 0.3–0.4 s when racing out of the countdown).
+          // predV is damped so the plane doesn't jitter with per-frame noise.
+          // Once note.time passes, the plane FREEZES so the bike can
+          // physically cross it (the back-projected crossing time keeps the
+          // judgment FPS-independent); a braking rider who never arrives is
+          // caught by the timeout-miss below.
           const lead = note.time - audioNow;
-          if (lead <= LOCK_WINDOW) {
-            // final approach: SNAP to the ideal crossing point. A damped
-            // tracker needs continuous frames to converge — at low FPS it
-            // would freeze mid-reconciliation and shift every judgment.
-            // Snapping is exact at any frame rate; residual error from
-            // acceleration over the remaining 0.2 s is ~2 ms at race speed.
-            g.s = bikeS + Math.max(4, this.predV * lead);
-            g.locked = true;
-          } else {
-            // far out: first-order tracking with rate λ lags a target moving
-            // at v by v/λ meters — bias sPred forward by that amount so the
-            // gate settles ON the ideal crossing point instead of v/λ early.
-            const sPred = bikeS + Math.max(6, this.predV * lead + this.predV / TRACK_LAMBDA);
-            g.s = damp(g.s, sPred, TRACK_LAMBDA, dt);
+          if (lead > 0) {
+            g.s = bikeS + Math.max(2, this.predV * lead);
+            this.place(g);
           }
-          this.place(g);
         }
 
         if (g.flash > 0) {
@@ -316,9 +318,11 @@ export class RhythmGates {
             const vRef = Math.max(4, bikeV);
             const crossTime = audioNow - (bikeS - g.s) / vRef;
             const delta = crossTime - note.time;
-            const laneOffset = Math.abs(bikeX - LANE_CENTERS[note.lane]);
+            const laneOffset = Math.abs(bikeX - this.highway.spline.laneX(g.s, note.lane));
             g.judged = true;
             this.stats.lastDelta = delta;
+            this.stats.recent.push(+delta.toFixed(3));
+            if (this.stats.recent.length > 16) this.stats.recent.shift();
             if (Math.abs(delta) <= PERFECT_SEC && laneOffset <= PERFECT_LANE) {
               this.stats.perfect++;
               this.judged(g, 'perfect');
@@ -338,7 +342,7 @@ export class RhythmGates {
             this.stats.miss++;
             this.stats.lastDelta = late;
             this.judged(g, 'miss');
-            this.pending.push({ judgment: 'miss', delta: late, laneOffset: Math.abs(bikeX - LANE_CENTERS[note.lane]), note });
+            this.pending.push({ judgment: 'miss', delta: late, laneOffset: Math.abs(bikeX - this.highway.spline.laneX(g.s, note.lane)), note });
           }
         }
 
@@ -385,8 +389,9 @@ export class RhythmGates {
 
   private place(g: Gate): void {
     const f = this.highway.frame(g.s);
-    const laneX = LANE_CENTERS[clamp(g.note.lane, 0, 3)];
-    g.group.position.set(f.x + f.rx * laneX, f.y + 0.12, f.z + f.rz * laneX);
+    // gate sits on the ACTUAL spline lane position — elevation-aware, taper-aware
+    const lx = this.highway.spline.laneX(g.s, g.note.lane);
+    g.group.position.set(f.x + f.rx * lx, f.y + 0.12, f.z + f.rz * lx);
     g.group.rotation.y = f.yaw;
   }
 
