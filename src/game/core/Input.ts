@@ -64,6 +64,18 @@ export class InputHandler {
   /** resolved tuck state (keyboard toggle OR gamepad hold) */
   tuckActive = false;
 
+  // ---- live settings (wired from Game.applySettings, §29) ----
+  /** raw steering gain — multiplies the analog command before smoothing */
+  sensitivity = 1;
+  /** attack/release rate scale — higher = snappier, lower = smoother */
+  response = 1;
+  throttleSens = 1;
+  brakeSens = 1;
+  /** gamepad stick deadzone (applied via gamepadSteer) */
+  deadzone = 0.09;
+  /** flips the steering command sign (controls setting) */
+  invertSteer = false;
+
   private onGamepadConnect = (e: GamepadEvent) => {
     this.gamepadIndex = e.gamepad.index;
     this.gamepadConnected = true;
@@ -144,6 +156,7 @@ export class InputHandler {
     let kBrake = this.key('KeyS') || this.key('ArrowDown') ? 1 : 0;
     let kRear = this.key('Space') ? 1 : 0;
     let kSteer = (this.key('KeyD') || this.key('ArrowRight') ? 1 : 0) - (this.key('KeyA') || this.key('ArrowLeft') ? 1 : 0);
+    if (this.invertSteer) kSteer = -kSteer; // §29 invert steering (controls)
     let kTuck = this.key('ShiftLeft') || this.key('ShiftRight');
     let kLookBack = this.key('KeyB');
 
@@ -169,6 +182,7 @@ export class InputHandler {
     let gpActive = false;
     if (gp) {
       const axLX = gp.axes[0] ?? 0;
+      const gpSteerRaw = gamepadSteer(axLX, this.deadzone); // settings-driven deadzone (§29)
       const rt = gp.buttons[7]?.value ?? 0;
       const lt = gp.buttons[6]?.value ?? 0;
       const aBtn = gp.buttons[0]?.pressed ?? false;
@@ -181,8 +195,8 @@ export class InputHandler {
       const dpu = gp.buttons[12]?.pressed ?? false;
       const dpd = gp.buttons[13]?.pressed ?? false;
 
-      const gpSteer = gamepadSteer(axLX); // sign contract: − = LEFT, + = RIGHT (§4)
-      const rtSig = Math.abs(rt) > 0.04 || Math.abs(lt) > 0.04 || Math.abs(gpSteer) > 0.04;
+      const gpSteer = this.invertSteer ? -gpSteerRaw : gpSteerRaw;
+      const rtSig = Math.abs(rt) > 0.04 || Math.abs(lt) > 0.04 || Math.abs(gpSteerRaw) > 0.04;
       if (rtSig) this.lastDevice = 'gamepad';
       gpActive = rtSig || aBtn || l3 || lb || r3 || yBtn || start;
 
@@ -224,14 +238,17 @@ export class InputHandler {
     if (this.once('ShiftLeft') || this.once('ShiftRight')) this.tuckToggled = !this.tuckToggled;
     const tuckActive = this.tuckToggled || kTuck;
 
-    // ---- smoothing (analog progressive feel) ----
-    // throttle: slower attack, quick release
-    this.throttle = moveToward(this.throttle, kThrottle, dt, kThrottle > this.throttle ? 3.2 : 7.5);
-    this.brake = moveToward(this.brake, kBrake, dt, kBrake > this.brake ? 6.0 : 10.0);
+    // ---- smoothing (analog progressive feel, scaled by settings §29) ----
+    // sensitivity scales the COMMAND (reach partial travel faster); response
+    // scales the smoothing RATE (snappier vs. smoother)
+    const sens = clamp(this.sensitivity, 0.2, 3);
+    const resp = clamp(this.response, 0.2, 3);
+    this.throttle = moveToward(this.throttle, clamp(kThrottle * this.throttleSens, 0, 1), dt, (kThrottle > this.throttle ? 3.2 : 7.5) * resp);
+    this.brake = moveToward(this.brake, clamp(kBrake * this.brakeSens, 0, 1), dt, (kBrake > this.brake ? 6.0 : 10.0) * resp);
     this.rearBrake = moveToward(this.rearBrake, kRear, dt, 12);
     // steering: medium attack, medium release, slight snap
-    const steerRate = Math.abs(kSteer) > 0 ? 7.5 : 9.5;
-    this.steer = moveToward(this.steer, clamp(kSteer, -1, 1), dt, steerRate);
+    const steerRate = (Math.abs(kSteer) > 0 ? 7.5 : 9.5) * resp;
+    this.steer = moveToward(this.steer, clamp(kSteer * sens, -1, 1), dt, steerRate);
     this.steer = clamp(this.steer, -1, 1);
     this.lookBack = kLookBack;
 

@@ -36,7 +36,7 @@ interface GameInternals {
     repairDespawns: number;
     repairPushes: number;
   };
-  gates: { stats: { perfect: number; good: number; miss: number; lastDelta: number; deltas: number[] } };
+  gates: { stats: { perfect: number; good: number; miss: number; lastDelta: number; recent: number[] } };
   rhythm: { getCurrentAudioTime(): number; getBeatPhase(): number; getEnergy(): number; getSectionName(): string } | null;
   songInfo: () => unknown;
 }
@@ -395,8 +395,8 @@ export class GameTestHarness {
   /** §5 rhythm gate timing stats */
   gateStats(): { perfect: number; good: number; miss: number; lastDelta: number; meanAbsDelta: number } {
     const s = this.internals.gates.stats;
-    const mean = s.deltas.length
-      ? s.deltas.reduce((a, b) => a + Math.abs(b), 0) / s.deltas.length
+    const mean = s.recent.length
+      ? s.recent.reduce((a, b) => a + Math.abs(b), 0) / s.recent.length
       : 0;
     return {
       perfect: s.perfect,

@@ -1,0 +1,43 @@
+— backend checks —
+  ✔ GET /api/health — {"server":"ok","yt-dlp":"ok","ffmpeg":"unavailable"}
+  ✔ health: yt-dlp available
+  ✔ GET /api/search?q=daft+punk — 4 results, first: D.a.f.t P.u.n.k Greatest Hits 🔥 Best D.
+  ✔ search result shape (id/title/channel/duration/thumbnail)
+  ✔ search with empty q → 400
+  ✔ stream with invalid id → 400
+— browser runtime —
+  ✔ menu renders
+  ✔ initial state = menu
+  ✔ WebGL render loop advancing
+  ✔ countdown reached
+  ✔ playing reached after countdown
+  ✔ bike accelerates — 284 km/h @ audio t=19.1s
+  ✔ bike steering moved lateral position — range=5.09 m x=-1.81
+  ✔ distance progressed — 437 m
+  ✔ demo analysis exists (128 BPM chart) — 525 gates
+  ✔ audio clock advancing — 19.13 s
+  ✔ gates scheduled/judged — {"perfect":0,"good":0,"miss":27,"lastDelta":2.393155782312924,"recent":[1.837,1.87,4.992]}
+  ✔ biome active — biome=2
+  ✘ scripted lane-homing lands PERFECT/GOOD judgments — {"perfect":0,"good":0,"miss":49,"lastDelta":9.199567346938778,"recent":[1.837,1.87,4.992]}
+  ✔ combo→multiplier→score math (Scoring module) — @20×:21000 reset+good:21500 best:20
+  ✔ camera cycles 5 modes (cockpit + chase-close) — seen=cockpit,chase-close,chase-far
+  ✔ pause freezes the audio timeline — Δ=0.000s
+  ✔ resume continues from the same time — resume Δ=0.160s
+  ✔ R restarts the run (fresh countdown timeline) — t=-2.94 state=countdown
+— upload mode (deterministic 120 BPM click track) —
+  ✔ upload → decoded → analyzed → countdown — state=countdown
+  ✔ upload analysis finds the click tempo — bpm=120 onsets=39 notes=38
+  ✔ upload-mode gates judged on the song timeline — t=18.0 {"perfect":0,"good":0,"miss":8,"lastDelta":2.191043083900226,"recent":[-0.279,3.084,3.05,3.017]}
+SMOKE TEST CRASH: 41 |                 break;
+42 |         }
+43 |         this.#args = args;
+44 |         this.#world.taskManager.add(this);
+45 |         if (options.timeout) {
+46 |             this.#timeoutError = new TimeoutError(`Waiting failed: ${options.timeout}ms exceeded`);
+                                      ^
+TimeoutError: Waiting failed: 20000ms exceeded
+      at new WaitTask (/home/daytona/codebase/node_modules/puppeteer-core/lib/puppeteer/common/WaitTask.js:46:34)
+      at waitForFunction (/home/daytona/codebase/node_modules/puppeteer-core/lib/puppeteer/api/Realm.js:49:26)
+      at waitForFunction (/home/daytona/codebase/node_modules/puppeteer-core/lib/puppeteer/api/Frame.js:585:43)
+      at main (/home/daytona/codebase/scripts/smoke.ts:523:16)
+

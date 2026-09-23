@@ -434,7 +434,6 @@ export class BikePhysicsModel {
   gearLabel(): string {
     return this.gear === 0 ? 'N' : String(this.gear);
   }
-
   /** hard reset for respawn: rolling 80 km/h in the given gear */
   respawnRolling(s: number, x: number, gear = 4): void {
     this.s = s;
@@ -454,6 +453,14 @@ export class BikePhysicsModel {
     this.aLong = 0;
     this.wheelie = 0;
     this.wheelieRate = 0;
+  }
+
+  /** rhythm-run start: already at the given pace (default 240 km/h) in top
+   *  gear so gate s positions are reachable from the very first note. */
+  respawnAtPace(s: number, x: number, v: number): void {
+    this.respawnRolling(s, x, 6);
+    this.v = v;
+    this.rpm = clamp((v / WHEEL_R) * GEAR_RATIO[5] * (60 / (Math.PI * 2)), RPM_IDLE, RPM_MAX_MODEL);
   }
 }
 
