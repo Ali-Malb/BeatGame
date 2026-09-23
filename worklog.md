@@ -65,3 +65,37 @@ Master prompt fixes (§1–§4, §6–§15, §31–§33). Physics/audio acceptan
 5. **Tests (§31–§33)** — `GameTestHarness` adds `steeringDirection` (fails if swapped), `inputDirection`, `wheelie`, `cameraFraming` (live eye/FOV + config readout), `songState`, `resolverChecks` (parse/split/LRC/word-timing/plain layout); `lean()` updated to the corrected convention; `runAll()` includes the new suite. `scripts/verify.ts` = headless run (all PASS; fire Hz 40→507 monotonic).
 
 e2e screenshots (dev preview): cockpit framing confirms §1 targets. Known env note unchanged: sandbox headless browser renders SwiftShader; real GPUs at tier-2.
+
+## Fourth pass — TAKEOVER: live gate-crossing bias fixed (31/31 smoke)
+
+Recovered the interrupted working tree (deterministic trackPosition + swept
+crossing + pure tests all intact and passing). Ran the actual game: pure suites
+passed but the live homing check still failed with a steady ~+0.44 s late bias
+(deltas 0.388→0.468, creeping +0.002/note).
+
+Root cause (two halves of one timing error, both fixed in Game.ts):
+1. gates.update was passed `audioT + dt` as the frame's audio time, but the
+   loop reads audioNow → sets lastAudioT → THEN tick(dt) integrates the bike.
+   The post-integration bike.s therefore corresponds to `audioT` itself, not
+   `audioT + dt` — every crossing's interpolated audio time was judged late by
+   one frame's dt (+17 ms @ 60 FPS, +33 ms @ 30 FPS, ~+0.4 s headless). At real
+   frame rates this silently ate most of the ±45 ms PERFECT window — the
+   "physically ride into the gate, judged wrong" player report.
+2. The countdown→playing trackOrigin anchor measured bike.s (which corresponds
+   to audioT − dt) as the song t=0 origin, biasing all gates early by up to a
+   frame. Now extrapolates: trackOrigin = bike.s − (audioT − dt)·RHYTHM_SPEED.
+
+Dev-harness-only hardening (real players untouched): the window.__home pace
+pin now lands AFTER the substep loop (judged swept-segment endpoints stay
+exact even when a mid-frame traffic collision halves v), and the pre-integration
+seed backs off one frame of pace travel.
+
+Verification (all re-run this pass):
+- bun scripts/gate-crossing.test.ts — ALL PASS (swept crossing, bands, lane
+  check, timeout, low-FPS multi-gate frames, speed independence)
+- bun scripts/rhythm-invariant.ts — ALL PASS (gate.s pure function of
+  note.time across 50/150/250/320 km/h, no gate movement, braking consequence)
+- bun scripts/smoke.ts --skip-song — 31 passed, 0 failed; lane-homing lands
+  PERFECT with lastDelta = -1.8e-15 s and recent = [0,…,0]; upload-mode deltas
+  converge linearly toward 0 as the pace pin re-locks after the free-ride phase
+- bun tsc -b --noEmit — clean

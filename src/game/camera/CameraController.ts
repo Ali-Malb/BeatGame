@@ -199,6 +199,12 @@ export class CameraController {
   private mirrorCamL: THREE.PerspectiveCamera;
   private mirrorCamR: THREE.PerspectiveCamera;
   mirrorEvery = 2; // render each mirror every Nth frame (2 → ~30 Hz @60fps)
+  /** mirror render-target resolution (settings: Mirror Quality, §31) */
+  mirrorRes = MIRROR_W;
+  /** user FOV offset added to every mode's base FOV (settings, §31) */
+  fovOffset = 0;
+  /** camera feel scale from settings (lean roll + shake response, §29) */
+  sensitivity = 1;
 
   // scratch
   private vForward = new THREE.Vector3();
@@ -262,6 +268,14 @@ export class CameraController {
   resize(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+  }
+
+  /** Mirror Quality setting: RT width in px (off handled via mirrorEvery=9999) */
+  setMirrorRes(px: number): void {
+    if (px === this.mirrorRes) return;
+    this.mirrorRes = px;
+    this.mirrorRTL.setSize(px, px / 2);
+    this.mirrorRTR.setSize(px, px / 2);
   }
 
   update(dt: number, bike: BikeController, input: { lookBack: boolean; tuck: boolean; accel: number; brakeInput: number }): void {
@@ -349,12 +363,12 @@ export class CameraController {
     this.camera.lookAt(this.vLook);
 
     // ---- head roll: 52° lean → ≈31° (§17), flipped while looking back ----
-    const roll = -bike.lean * cfg.leanRollFactor * (back > 0.5 ? -1 : 1) + smoothNoise(t * 40, 7) * vibAmp * 3;
+    const roll = -bike.lean * cfg.leanRollFactor * this.sensitivity * (back > 0.5 ? -1 : 1) + smoothNoise(t * 40, 7) * vibAmp * 3;
     this.camera.rotateZ(roll);
 
-    // ---- FOV: 85 → 105 between 150–300 km/h + beat kick (§17) ----
+    // ---- FOV: 85 → 105 between 150–300 km/h + beat kick + user offset (§17/§31) ----
     const fovTarget =
-      cfg.fovBase + (cfg.fovMax - cfg.fovBase) * clamp((kmhV - cfg.fovSpeedLo) / (cfg.fovSpeedHi - cfg.fovSpeedLo), 0, 1) +
+      cfg.fovBase + this.fovOffset + (cfg.fovMax - cfg.fovBase) * clamp((kmhV - cfg.fovSpeedLo) / (cfg.fovSpeedHi - cfg.fovSpeedLo), 0, 1) +
       (this.fovKick * 180) / Math.PI;
     this.fovCurrent = lerp(this.fovCurrent, fovTarget, lerpFactor(6, dt));
     if (Math.abs(this.camera.fov - this.fovCurrent) > 0.05) {
@@ -422,8 +436,8 @@ export class CameraController {
     }
 
     const fovRange = CAM_CONFIG.dynamic.fovMax - CAM_CONFIG.dynamic.fovBase;
-    const fovBase = cfg.fovBase;
-    const fovTarget = fovBase + (cfg.fovMax - fovBase) * clamp((kmhV - 120) / 190, 0, 1) +
+    const fovBase = cfg.fovBase + this.fovOffset; // user FOV offset (§31)
+    const fovTarget = fovBase + (cfg.fovMax - fovBase + this.fovOffset) * clamp((kmhV - 120) / 190, 0, 1) +
       (mode === 'dynamic' ? (this.fovKick * 180) / Math.PI * fovRange / 10 : 0);
     this.fovCurrent = lerp(this.fovCurrent, fovTarget, lerpFactor(5, dt));
     if (Math.abs(this.camera.fov - this.fovCurrent) > 0.05) {

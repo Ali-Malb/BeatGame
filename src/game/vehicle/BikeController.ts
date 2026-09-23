@@ -278,6 +278,27 @@ export class BikeController {
     this.lastJointS = Math.floor(this.model.s / JOINT_EVERY) * JOINT_EVERY;
   }
 
+  /** rhythm-run launch: at pace (m/s) in the given lane from the first frame */
+  launchAtPace(s: number, lane: number, v: number) {
+    this.uncrash(s, lane, v);
+    this.lastJointS = Math.floor(this.model.s / JOINT_EVERY) * JOINT_EVERY;
+  }
+
+  /** clear a tumble and resume rolling at the given speed (test-harness
+   *  recovery + future respawn paths): resets the crash visual/physics state
+   *  AND the model — a bare model field patch leaves the controller crashed,
+   *  so updateVisuals keeps driving the tumble forever. */
+  uncrash(s: number, lane: number, v: number) {
+    this.crashed = false;
+    this.crashTime = 0;
+    this.crashSpin.identity();
+    this.crashY = 0;
+    const lanes = this.highway.spline.lanesAt(s);
+    this.model.respawnRolling(s, this.highway.spline.laneX(s, clamp(lane, 0, lanes - 1)), 4);
+    this.model.v = v;
+    this.group.quaternion.setFromEuler(_crashE.set(0, 0, 0));
+  }
+
   telemetry(): BikeTelemetry {
     const m = this.model;
     const neutral = this.highway.spline.neutralLean(m.s, m.v);

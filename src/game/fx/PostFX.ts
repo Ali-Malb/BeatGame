@@ -144,6 +144,9 @@ const FinalShader = {
 
 export class PostFX {
   composer: EffectComposer;
+  /** settings toggles — actually gate the effects (§31) */
+  bloomEnabled = true;
+  motionBlurEnabled = true;
   private bloom: UnrealBloomPass;
   private finalPass: ShaderPass;
   private renderPass: RenderPass;
@@ -212,7 +215,7 @@ export class PostFX {
     this.chromaValue = Math.max(0, this.chromaValue - dt * 1.8);
     this.bloomPulseValue = Math.max(0, this.bloomPulseValue - dt * 3.2);
     const u = this.finalPass.uniforms;
-    const blurK = params.speedKmh > 180 ? Math.pow(Math.min(1, (params.speedKmh - 180) / 120), 2) : 0;
+    const blurK = this.motionBlurEnabled && params.speedKmh > 180 ? Math.pow(Math.min(1, (params.speedKmh - 180) / 120), 2) : 0;
     u.uSpeedBlur.value = blurK;
     u.uRain.value = params.rain;
     u.uTime.value += dt;
@@ -225,7 +228,9 @@ export class PostFX {
     u.uChroma.value = this.chromaValue;
     u.uChromaRed.value = this.chromaValue > 0.01 ? 1 : 0;
     this.bloomBase = params.bloom;
-    this.bloom.strength = params.bloom + this.bloomPulseValue;
+    this.bloom.strength = this.bloomEnabled ? params.bloom + this.bloomPulseValue : 0;
+    // disabled bloom skips its render cost entirely
+    this.bloom.enabled = this.bloomEnabled;
   }
 
   resize(width: number, height: number) {

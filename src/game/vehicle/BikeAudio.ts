@@ -73,6 +73,14 @@ export class MotorcycleAudio {
   enabled = true;
   volume = 0.85;
 
+  // ---- per-category volumes wired from Settings → Audio (§30) ----
+  /** near-miss / crash / shatter level (already includes master) */
+  sfxVolume = 0.9;
+  /** UI blips level (already includes master) */
+  uiVolume = 0.8;
+  /** gate judgment ping level (already includes master) */
+  hudVolume = 0.9;
+
   get context(): AudioContext | null {
     return this.ctx;
   }
@@ -432,6 +440,8 @@ export class MotorcycleAudio {
   /** rhythm gate judgement ping — bright arp for PERFECT, soft tick for GOOD */
   gatePing(perfect: boolean): void {
     if (!this.ctx || !this.started) return;
+    const vol = this.hudVolume;
+    if (vol <= 0.001) return;
     const ctx = this.ctx;
     const t = ctx.currentTime;
     const notes = perfect ? [76, 83, 88] : [71, 76];
@@ -441,9 +451,9 @@ export class MotorcycleAudio {
       osc.type = 'triangle';
       osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
       const g = ctx.createGain();
-      const amp = perfect ? 0.22 : 0.1;
+      const amp = (perfect ? 0.22 : 0.1) * vol;
       g.gain.setValueAtTime(0.0001, at);
-      g.gain.exponentialRampToValueAtTime(amp, at + 0.008);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, amp), at + 0.008);
       g.gain.exponentialRampToValueAtTime(0.0001, at + 0.28);
       osc.connect(g);
       g.connect(this.fxBus);
@@ -542,9 +552,9 @@ export class MotorcycleAudio {
     bp.frequency.exponentialRampToValueAtTime(base * 6, t + 0.12);
     bp.frequency.exponentialRampToValueAtTime(base * 0.9, t + 0.42);
     const g = ctx.createGain();
-    const vol = clamp(0.14 + intensity * 0.4, 0, 0.6);
+    const vol = clamp(0.14 + intensity * 0.4, 0, 0.6) * this.sfxVolume;
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + 0.09);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t + 0.09);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.46);
     const panner = ctx.createStereoPanner();
     panner.pan.value = clamp(pan, -1, 1);
@@ -604,7 +614,7 @@ export class MotorcycleAudio {
     lp.frequency.setValueAtTime(3000, t);
     lp.frequency.exponentialRampToValueAtTime(160, t + 0.5);
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0.6, t);
+    g.gain.setValueAtTime(0.6 * this.sfxVolume, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
     src.connect(lp);
     lp.connect(g);

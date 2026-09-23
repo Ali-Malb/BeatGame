@@ -121,6 +121,16 @@
   }
 }
 
+/* ---- game typography hierarchy (§32): display for impact, UI for text,
+   monospace ONLY for debug/telemetry ---- */
+.font-display {
+  font-family: var(--font-display), 'Saira', var(--font-inter), 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-variation-settings: normal;
+}
+.font-ui {
+  font-family: var(--font-inter), 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
 /* near-miss / sync popup: float up ≈10px and fade over 0.6 s (§32) */
 @keyframes cam-fade {
   0% { opacity: 0; transform: translate(-50%, 6px); }
@@ -205,4 +215,24 @@
   0% { transform: translateY(10px) scale(1.35); opacity: 0; }
   18% { transform: translateY(0) scale(1.05); opacity: 1; }
   100% { transform: translateY(-14px) scale(1); opacity: 0; }
+}
+/* perfect/good/miss judgment: big display-font slam (§27) */
+.judgement-slam {
+  font-family: var(--font-display), 'Saira', var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.14em;
+  animation: judgement-pop 0.7s cubic-bezier(0.2, 0.9, 0.25, 1) forwards;
+}
+.judgement-perfect {
+  color: #7defff;
+  text-shadow: 0 0 26px rgba(80, 220, 255, 0.85), 0 0 60px rgba(60, 180, 255, 0.45), 0 2px 10px rgba(0, 0, 0, 0.9);
+}
+.judgement-good {
+  color: #bfe6ff;
+  text-shadow: 0 0 16px rgba(150, 210, 255, 0.6), 0 2px 10px rgba(0, 0, 0, 0.9);
+}
+.judgement-miss {
+  color: #ff5a5a;
+  text-shadow: 0 0 22px rgba(255, 60, 60, 0.8), 0 2px 10px rgba(0, 0, 0, 0.9);
 }

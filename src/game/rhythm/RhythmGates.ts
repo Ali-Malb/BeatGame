@@ -1,36 +1,46 @@
 /**
- * RhythmGates — physical, lane-assigned rhythm gates driven by the chart.
+ * RhythmGates — physical lane gates with DETERMINISTIC world positions.
  *
- * Each chart note becomes a real 3D object (3.2 × 0.2 × 0.8 m emissive bar
- * floating over its lane). The gate's spline position is continuously
- * reconciled so that it physically reaches the bike's crossing point at the
- * note's AUDIO timestamp:
+ * ═══ THE CORE INVARIANT (§3/§4) ═══
+ * A note's track position is a pure function of its chart timestamp:
  *
- *   s_gate = s_bike + v_pred · (t_note − audioNow)
+ *     gate.s = trackOrigin + note.time × RHYTHM_SPEED   (240 km/h)
  *
- * (v_pred is a damped copy of player velocity, so acceleration/braking are
- * absorbed while the gate is far; the position LOCKS ~0.55 s before the note,
- * after which the player's own timing decides the judgment.)
+ * Once spawned, a gate's S NEVER changes — not with player speed, not with
+ * acceleration, not with FPS. The PLAYER rides to the beat: accelerate to
+ * arrive early, brake to arrive late, hold the rhythm pace (240 km/h) to land
+ * PERFECT. The gate never chases, predicts or reconciles toward the bike.
  *
- * Judging (front-tire crossing of the gate plane):
- *   PERFECT |Δt| ≤ 45 ms  and lane offset ≤ 1.2 m
- *   GOOD    46–90 ms      and lane offset ≤ 1.6 m
- *   MISS    beyond the windows, or the gate passes un-judged
+ * Judgment happens on the PHYSICAL crossing of the gate's plane, recovered
+ * from the swept prev→current bike segment (§4/§7/§9) so it is independent of
+ * render FPS — one frame may span multiple gates and every one is judged:
+ *   alpha = (gateS − prevBikeS) / (bikeS − prevBikeS), clamped 0..1
+ *   crossAudio = prevAudio + alpha·(audioNow − prevAudio)   (NOT frame time)
+ *   delta = crossAudio − note.time
+ *   PERFECT |Δt| ≤ 45 ms & lane offset ≤ 1.2 m · GOOD ≤ 90 ms & ≤ 1.6 m
+ * Lane offset uses the interpolated crossX against the road spline's laneX at
+ * gateS (curved/banked roads give per-lane world X).
  *
- * All pools are preallocated; nothing is created or destroyed per frame.
+ * Spawning: a note is instantiated when the PLAYER is close enough that the
+ * gate will be visible (see SPAWN_AHEAD_SEC), NOT based on audio proximity —
+ * a slow player sees gates materialize ahead early, a fast player later.
+ * Gate visuals (shatter, flash, anchor posts, lane pad) are presentation only.
+ * All pools preallocated; nothing created/destroyed per frame.
  */
 
 import * as THREE from 'three';
 import type { Highway } from '../environment/Highway';
 import type { RhythmChart, ChartNote } from './RhythmChart';
-import { clamp, damp } from '../core/utils';
+import { trackPositionFor } from './trackPosition';
+
+const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
 export type GateJudgment = 'perfect' | 'good' | 'miss';
 
 export interface GateEvent {
   judgment: GateJudgment;
-  delta: number; // audioNow − noteTime (s, + = late)
-  laneOffset: number; // |bike.x − gate.x| (m)
+  delta: number; // crossingAudioTime − noteTime (s, + = late)
+  laneOffset: number; // |bike.x − gate lane center| (m)
   note: ChartNote;
 }
 
@@ -38,24 +48,45 @@ const PERFECT_SEC = 0.045;
 const GOOD_SEC = 0.09;
 const PERFECT_LANE = 1.2;
 const GOOD_LANE = 1.6;
-const LOCK_WINDOW = 0.20; // s before the note when the gate snaps to the ideal crossing point
-const SCHEDULE_HORIZON = 7.0; // s of music to keep instantiated
-const POOL_SIZE = 44;
-const TRACK_LAMBDA = 10; // reconcile rate; tracking lag v/λ is compensated
+/** gates materialize when the PLAYER is within this many meters of travel */
+const SPAWN_AHEAD_M = 900;
+/** audio-time lateness beyond which an un-crossed gate is judged MISS (§8 B) */
+const LATE_MISS_SEC = 2.0;
+const POOL_SIZE = 48;
 
 const LANE_COLORS = [0x35e0ff, 0xff4fd8, 0xffb43a, 0x7dff5a];
 
 interface Gate {
   active: boolean;
   judged: boolean;
-  locked: boolean;
   note: ChartNote;
-  s: number;
+  s: number; // FIXED track position (never changes after spawn)
   group: THREE.Group;
   bar: THREE.Mesh;
   halo: THREE.Mesh;
+  pad: THREE.Mesh;
   mats: THREE.MeshBasicMaterial[];
   flash: number;
+}
+
+/** per-frame bike state (§4/§9): the render frame is only the OBSERVATION
+ *  interval — crossings are recovered from the swept prev→current segment. */
+interface BikeFrame {
+  s: number;
+  x: number;
+  audioT: number;
+}
+
+/** last GATE CROSS log line for the debug overlay */
+export interface GateCrossLog {
+  noteTime: number;
+  gateS: number;
+  crossS: number;
+  crossAudio: number;
+  delta: number;
+  laneOffset: number;
+  judgment: GateJudgment;
+  alpha: number;
 }
 
 /** shared shatter particle burst (bounded, additive, no per-frame allocation) */
@@ -150,11 +181,15 @@ export class RhythmGates {
   private gates: Gate[] = [];
   private chart: RhythmChart | null = null;
   private chartIndex = 0;
-  private lastScheduled = -1;
-  private predV = 60;
+  private trackOrigin = 60;
   private shatter: ShatterBurst;
-  private frameScratch = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
   private tmpColor = new THREE.Color();
+
+  /** §4/§9: bike state at the END of the previous update — swept-segment origin */
+  private prevBike: BikeFrame = { s: -Infinity, x: 0, audioT: 0 };
+  private havePrev = false;
+  /** last GATE CROSS log (debug overlay / telemetry) */
+  lastCross: GateCrossLog | null = null;
 
   stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0, recent: [] as number[] };
 
@@ -164,8 +199,6 @@ export class RhythmGates {
     const capGeo = new THREE.BoxGeometry(0.18, 0.28, 0.86);
     const haloGeo = new THREE.PlaneGeometry(3.4, 1.6);
     haloGeo.rotateX(-Math.PI / 2);
-    // world-anchoring hardware (§12): posts + painted lane pad so gates read
-    // as physical structures on the road, not floating UI bars
     const postMat = new THREE.MeshStandardMaterial({ color: 0x2e3238, roughness: 0.55, metalness: 0.6 });
     const postGeo = new THREE.BoxGeometry(0.09, 0.62, 0.09);
     const padGeo = new THREE.PlaneGeometry(3.3, 4.2);
@@ -198,12 +231,10 @@ export class RhythmGates {
         const cap = new THREE.Mesh(capGeo, mats[1]);
         cap.position.set(side * 1.62, 0.58, 0);
         group.add(cap);
-        // anchor post: deck → bar (world-anchored silhouette)
         const post = new THREE.Mesh(postGeo, postMat);
         post.position.set(side * 1.62, 0.3, 0);
         group.add(post);
       }
-      // painted lane pad under the bar (follows the deck, fades with judging)
       const pad = new THREE.Mesh(padGeo, padMats[lane]);
       pad.position.y = 0.02;
       group.add(pad);
@@ -215,12 +246,12 @@ export class RhythmGates {
       this.gates.push({
         active: false,
         judged: true,
-        locked: false,
         note: { time: 0, lane, subdivision: 4, strength: 0, type: 'kick' },
         s: 0,
         group,
         bar,
         halo,
+        pad,
         mats,
         flash: 0,
       });
@@ -229,6 +260,8 @@ export class RhythmGates {
   }
 
   private static haloTexture(): THREE.Texture {
+    // headless-safe: tests run without DOM — a blank texture is fine there
+    if (typeof document === 'undefined') return new THREE.Texture();
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const ctx = c.getContext('2d');
@@ -239,24 +272,26 @@ export class RhythmGates {
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, 64, 64);
     }
-    const tex = new THREE.CanvasTexture(c);
-    return tex;
+    return new THREE.CanvasTexture(c);
   }
 
-  /** swap in a new chart (analysis complete / restart). Resets all state. */
-  setChart(chart: RhythmChart | null, audioTime: number): void {
+  /** swap in a new chart. trackOrigin = the bike's spline coordinate at song t=0. */
+  setChart(chart: RhythmChart | null, trackOrigin: number): void {
     this.chart = chart;
-    this.reset(audioTime);
+    this.trackOrigin = trackOrigin;
+    this.reset();
   }
 
-  reset(audioTime: number): void {
+  reset(): void {
     for (const g of this.gates) {
       g.active = false;
       g.judged = true;
       g.group.visible = false;
     }
-    this.lastScheduled = audioTime;
     this.chartIndex = 0;
+    this.prevBike = { s: -Infinity, x: 0, audioT: 0 };
+    this.havePrev = false;
+    this.lastCross = null;
     this.stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0, recent: [] as number[] };
   }
 
@@ -264,50 +299,122 @@ export class RhythmGates {
   private pending: GateEvent[] = [];
 
   update(dt: number, audioNow: number, bikeS: number, bikeV: number, bikeX: number): GateEvent[] {
-    // seed the velocity estimate on first contact so the first reconciliations
-    // don't place gates at bikeS + 0 (measured: cold-start predV=0 bulldozed
-    // the opening gates and burned the miss budget before the run even formed)
-    if (this.predV <= 0 && bikeV > 2) this.predV = bikeV;
-    this.predV = damp(this.predV, bikeV, 6, dt);
+    void dt;
+    void bikeV;
     this.pending.length = 0;
+    const curBike: BikeFrame = { s: bikeS, x: bikeX, audioT: audioNow };
     const chart = this.chart;
     if (chart && chart.notes.length > 0) {
-      // ---- schedule: instantiate gates inside the horizon ----
-      while (
-        this.chartIndex < chart.notes.length &&
-        chart.notes[this.chartIndex].time < audioNow + SCHEDULE_HORIZON
-      ) {
-        const note = chart.notes[this.chartIndex++];
-        if (note.time < audioNow - 0.2) continue; // already past (restart case)
+      // ---- spawn: gates materialize when the PLAYER gets close enough ----
+      // (audio time is irrelevant to spawning — a slow rider sees them early)
+      // NOTE: chartIndex only advances when the note is spawned or skipped;
+      // a full pool leaves the note queued for a later frame.
+      while (this.chartIndex < chart.notes.length) {
+        const note = chart.notes[this.chartIndex];
+        const s = trackPositionFor(note.time, this.trackOrigin);
+        if (s >= bikeS + SPAWN_AHEAD_M) break; // too far ahead — wait
+        this.chartIndex++;
+        if (s < bikeS - 40) continue; // already passed (restart case)
         const gate = this.findFree();
-        if (!gate) break;
-        this.initGate(gate, note, audioNow, bikeS, bikeV);
+        if (!gate) {
+          this.chartIndex--; // pool exhausted — retry next frame
+          break;
+        }
+        this.initGate(gate, note, s);
       }
 
-      // ---- per-gate reconcile / judge / recycle ----
+      // ── §4/§7/§9: SWEPT crossing detection ──
+      // The frame is only the observation interval [prevBike.s, bikeS]. Every
+      // active gate whose plane lies inside it was physically crossed — even
+      // when one frame spans several gates (10 FPS) or the bike never renders
+      // near a gate (144 FPS at 320 km/h ≈ 89 m/frame).
+      const fromS = this.havePrev ? this.prevBike.s : bikeS;
+      const fromAudio = this.havePrev ? this.prevBike.audioT : audioNow;
+      const fromX = this.havePrev ? this.prevBike.x : bikeX;
+      const spanS = bikeS - fromS;
+      const spanAudio = audioNow - fromAudio;
+      const crossed: Gate[] = [];
       for (const g of this.gates) {
-        if (!g.active) continue;
-        const note = g.note;
+        if (g.active && !g.judged && fromS < g.s && bikeS >= g.s) crossed.push(g);
+      }
+      if (crossed.length > 1) crossed.sort((a, b) => a.s - b.s); // world order
 
-        if (!g.judged) {
-          // CONTINUOUS ideal reconciliation (§39): while the note is in the
-          // future the gate sits at bikeS + v·lead — exactly where the bike
-          // will be at note.time if it holds speed. Exact under acceleration,
-          // braking and at any frame rate; a locked/snap approach bakes in a
-          // stale speed and makes every crossing late by the acceleration
-          // integral (measured 0.3–0.4 s when racing out of the countdown).
-          // predV is damped so the plane doesn't jitter with per-frame noise.
-          // Once note.time passes, the plane FREEZES so the bike can
-          // physically cross it (the back-projected crossing time keeps the
-          // judgment FPS-independent); a braking rider who never arrives is
-          // caught by the timeout-miss below.
-          const lead = note.time - audioNow;
-          if (lead > 0) {
-            g.s = bikeS + Math.max(2, this.predV * lead);
-            this.place(g);
+      for (const g of crossed) {
+        // recover the actual crossing instant inside the frame
+        const alpha = spanS > 1e-9 ? Math.min(1, Math.max(0, (g.s - fromS) / spanS)) : 1;
+        const crossAudio = fromAudio + alpha * spanAudio;
+        const crossX = fromX + alpha * (bikeX - fromX);
+        const delta = crossAudio - g.note.time;
+        // §6: lane position from the ACTUAL road spline at gateS
+        const laneOffset = Math.abs(crossX - this.highway.spline.laneX(g.s, g.note.lane));
+        g.judged = true;
+        this.lastCross = {
+          noteTime: g.note.time,
+          gateS: g.s,
+          crossS: g.s,
+          crossAudio,
+          delta,
+          laneOffset,
+          judgment: 'miss',
+          alpha,
+        };
+        let judgment: GateJudgment;
+        if (Math.abs(delta) <= PERFECT_SEC && laneOffset <= PERFECT_LANE) {
+          judgment = 'perfect';
+          this.stats.perfect++;
+        } else if (Math.abs(delta) <= GOOD_SEC && laneOffset <= GOOD_LANE) {
+          judgment = 'good';
+          this.stats.good++;
+        } else {
+          judgment = 'miss';
+          this.stats.miss++;
+        }
+        this.lastCross.judgment = judgment;
+        this.stats.lastDelta = delta;
+        this.stats.recent.push(+delta.toFixed(3));
+        if (this.stats.recent.length > 16) this.stats.recent.shift();
+        // §10: one log per physical crossing — this is event-rate, not
+        // per-frame, so it never becomes verbose spam in production.
+        if (typeof console !== 'undefined') {
+          console.log(
+            `[GATE CROSS] note=${g.note.time.toFixed(3)} gateS=${g.s.toFixed(1)} crossS=${g.s.toFixed(1)} crossAudio=${crossAudio.toFixed(3)} delta=${delta.toFixed(3)} laneOffset=${laneOffset.toFixed(2)} judgment=${judgment.toUpperCase()}`,
+          );
+        }
+        this.judged(g, judgment);
+        this.pending.push({ judgment, delta, laneOffset, note: g.note });
+      }
+
+      // ── §8 B: late-miss ONLY while still BEHIND the plane ──
+      // A gate the player is physically approaching (or standing beside) is
+      // never recycled or teleported; the late window is pure audio lateness
+      // for a rider who failed to reach the fixed world position in time.
+      if (audioNow - (this.havePrev ? this.prevBike.audioT : audioNow) >= -1) {
+        for (const g of this.gates) {
+          if (g.active && !g.judged && bikeS < g.s && audioNow - g.note.time > LATE_MISS_SEC) {
+            const laneOffset = Math.abs(bikeX - this.highway.spline.laneX(g.s, g.note.lane));
+            const late = audioNow - g.note.time;
+            g.judged = true;
+            this.stats.miss++;
+            this.stats.lastDelta = late;
+            this.lastCross = {
+              noteTime: g.note.time,
+              gateS: g.s,
+              crossS: bikeS,
+              crossAudio: audioNow,
+              delta: late,
+              laneOffset,
+              judgment: 'miss',
+              alpha: 0,
+            };
+            this.judged(g, 'miss');
+            this.pending.push({ judgment: 'miss', delta: late, laneOffset, note: g.note });
           }
         }
+      }
 
+      // ---- per-gate visuals / recycle ----
+      for (const g of this.gates) {
+        if (!g.active) continue;
         if (g.flash > 0) {
           g.flash -= dt;
           const k = Math.max(0, g.flash / 0.4);
@@ -318,50 +425,10 @@ export class RhythmGates {
           );
           g.bar.scale.y = 1 + 1.6 * k;
           (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34 + 0.5 * k;
+          g.pad.material instanceof THREE.MeshStandardMaterial &&
+            ((g.pad.material as THREE.MeshStandardMaterial).opacity = 0.45 + 0.5 * k);
         }
-
-        // ---- judging ----
-        if (!g.judged) {
-          const crossed = bikeS >= g.s;
-          const late = audioNow - note.time;
-          if (crossed) {
-            // §39: judge against the INTERPOLATED crossing instant, not the
-            // frame-sampled audioNow — at low FPS the detection frame can lag
-            // the physical crossing by hundreds of ms, which would otherwise
-            // fake a "late" miss. Back-project the overshoot distance at the
-            // current speed to recover when the plane was actually crossed.
-            const vRef = Math.max(4, bikeV);
-            const crossTime = audioNow - (bikeS - g.s) / vRef;
-            const delta = crossTime - note.time;
-            const laneOffset = Math.abs(bikeX - this.highway.spline.laneX(g.s, note.lane));
-            g.judged = true;
-            this.stats.lastDelta = delta;
-            this.stats.recent.push(+delta.toFixed(3));
-            if (this.stats.recent.length > 16) this.stats.recent.shift();
-            if (Math.abs(delta) <= PERFECT_SEC && laneOffset <= PERFECT_LANE) {
-              this.stats.perfect++;
-              this.judged(g, 'perfect');
-              this.pending.push({ judgment: 'perfect', delta, laneOffset, note });
-            } else if (Math.abs(delta) <= GOOD_SEC && laneOffset <= GOOD_LANE) {
-              this.stats.good++;
-              this.judged(g, 'good');
-              this.pending.push({ judgment: 'good', delta, laneOffset, note });
-            } else {
-              this.stats.miss++;
-              this.judged(g, 'miss');
-              this.pending.push({ judgment: 'miss', delta, laneOffset, note });
-            }
-          } else if (late > GOOD_SEC + 0.1) {
-            // player braked hard and never crossed in time
-            g.judged = true;
-            this.stats.miss++;
-            this.stats.lastDelta = late;
-            this.judged(g, 'miss');
-            this.pending.push({ judgment: 'miss', delta: late, laneOffset: Math.abs(bikeX - this.highway.spline.laneX(g.s, note.lane)), note });
-          }
-        }
-
-        // ---- recycle ----
+        // §8 D: recycle only AFTER judgment (never mid-approach)
         if (g.judged && g.flash <= 0 && bikeS > g.s + 20) {
           g.active = false;
           g.group.visible = false;
@@ -369,6 +436,8 @@ export class RhythmGates {
       }
     }
 
+    this.prevBike = curBike;
+    this.havePrev = true;
     this.shatter.update(dt);
     return this.pending;
   }
@@ -376,25 +445,26 @@ export class RhythmGates {
   private judged(g: Gate, kind: GateJudgment): void {
     const c = this.tmpColor.setHex(LANE_COLORS[g.note.lane]);
     if (kind === 'miss') {
-      g.flash = 0.0; // dim out immediately
+      g.flash = 0.0;
       g.mats[0].color.setRGB(0.25, 0.25, 0.28);
       (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.1;
       g.bar.scale.y = 0.35;
+      (g.pad.material as THREE.MeshStandardMaterial).opacity = 0.12;
     } else {
       g.flash = kind === 'perfect' ? 0.4 : 0.22;
       this.shatter.burst(g.group.position.x, g.group.position.y + 0.7, g.group.position.z, c, kind === 'perfect' ? 26 : 14, kind === 'perfect' ? 1.2 : 0.8);
     }
   }
 
-  private initGate(gate: Gate, note: ChartNote, audioNow: number, bikeS: number, bikeV: number): void {
+  private initGate(gate: Gate, note: ChartNote, s: number): void {
     gate.active = true;
     gate.judged = false;
-    gate.locked = false;
     gate.note = note;
+    gate.s = s; // FIXED — never modified after this
     gate.flash = 0;
-    gate.s = bikeS + Math.max(6, (bikeV || 60) * (note.time - audioNow));
     gate.bar.scale.y = 1;
     (gate.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34;
+    (gate.pad.material as THREE.MeshStandardMaterial).opacity = 0.45;
     const c = LANE_COLORS[note.lane];
     gate.mats[0].color.setHex(c).multiplyScalar(1.15);
     gate.mats[1].color.setHex(c).multiplyScalar(1.9);
@@ -404,7 +474,6 @@ export class RhythmGates {
 
   private place(g: Gate): void {
     const f = this.highway.frame(g.s);
-    // gate sits on the ACTUAL spline lane position — elevation-aware, taper-aware
     const lx = this.highway.spline.laneX(g.s, g.note.lane);
     g.group.position.set(f.x + f.rx * lx, f.y + 0.12, f.z + f.rz * lx);
     g.group.rotation.y = f.yaw;
@@ -415,11 +484,56 @@ export class RhythmGates {
     return null;
   }
 
-  /** next un-judged note time (debug HUD) */
-  nextNoteTime(audioNow: number): number {
+  /** deterministic track position of the next un-judged note (debug HUD) */
+  nextNoteS(bikeS: number): { s: number; time: number; lane: number } {
+    const chart = this.chart;
+    if (!chart) return { s: 0, time: 0, lane: 1 };
+    for (let i = Math.max(0, this.chartIndex - 40); i < chart.notes.length; i++) {
+      const n = chart.notes[i];
+      const s = trackPositionFor(n.time, this.trackOrigin);
+      if (s >= bikeS - 5) return { s, time: n.time, lane: n.lane };
+    }
+    return { s: 0, time: 0, lane: 1 };
+  }
+
+  /** §10 debug telemetry: swept-frame + last-crossing internals for the HUD */
+  debugInfo(bikeS: number): {
+    prevBikeS: number;
+    prevAudioT: number;
+    crossAlpha: number;
+    crossAudio: number;
+    crossDelta: number;
+    crossLaneOffset: number;
+    crossJudgment: string;
+    gateS: number;
+    gateTime: number;
+    gateLane: number;
+    gateLaneX: number;
+  } {
+    const next = this.nextNoteS(bikeS);
+    const c = this.lastCross;
+    return {
+      prevBikeS: this.havePrev ? Math.round(this.prevBike.s) : 0,
+      prevAudioT: +this.prevBike.audioT.toFixed(3),
+      crossAlpha: c ? +c.alpha.toFixed(3) : 0,
+      crossAudio: c ? +c.crossAudio.toFixed(3) : 0,
+      crossDelta: c ? +c.delta.toFixed(4) : 0,
+      crossLaneOffset: c ? +c.laneOffset.toFixed(2) : 0,
+      crossJudgment: c ? c.judgment.toUpperCase() : '—',
+      gateS: +next.s.toFixed(1),
+      gateTime: +next.time.toFixed(3),
+      gateLane: next.lane,
+      gateLaneX: +this.highway.spline.laneX(next.s, next.lane).toFixed(2),
+    };
+  }
+
+  /** next un-judged note time (compat) */
+  nextNoteTime(): number {
     const chart = this.chart;
     if (!chart) return 0;
-    for (const n of chart.notes) if (n.time > audioNow) return n.time;
+    for (let i = Math.max(0, this.chartIndex - 40); i < chart.notes.length; i++) {
+      if (trackPositionFor(chart.notes[i].time, this.trackOrigin) >= 0) return chart.notes[i].time;
+    }
     return 0;
   }
 

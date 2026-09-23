@@ -13,9 +13,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GameManager, type GameState, type Telemetry } from '@/game/core/Game';
 import { CAMERA_MODE_NAMES, type CameraMode } from '@/game/camera/CameraController';
+import type { GameSettingsData } from '@/game/core/GameSettings';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame } from 'lucide-react';
+import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame, Settings as SettingsIcon } from 'lucide-react';
 
 interface Popup {
   id: number;
@@ -61,6 +62,7 @@ const EMPTY_TELEMETRY: Telemetry = {
   countdown: null,
   song: { source: 'demo', videoId: '', title: 'MIDNIGHT RUNNER — C1 Inner Loop', channel: 'built-in synthwave' },
   analysisQuality: '—',
+  rhythmSpeedKmh: 240,
   debug: {
     audioTime: 0,
     beatPhase: 0,
@@ -69,9 +71,21 @@ const EMPTY_TELEMETRY: Telemetry = {
     laneX: 0,
     activeGates: 0,
     nextGateTime: 0,
+    nextGateS: 0,
     gateDelta: 0,
+    trackOrigin: 60,
     distanceKm: 0,
     nearMisses: 0,
+    prevAudioT: 0,
+    prevBikeS: 0,
+    crossAlpha: 0,
+    crossAudio: 0,
+    crossDelta: 0,
+    crossLaneOffset: 0,
+    crossJudgment: '—',
+    gateS: 0,
+    gateLane: 1,
+    gateLaneX: 0,
   },
 };
 
@@ -102,6 +116,8 @@ export default function GameView() {
   const [progress, setProgress] = useState<{ phase: string; fraction: number; detail: string } | null>(null);
   const [analysisInfo, setAnalysisInfo] = useState<{ bpm: number; duration: number; sections: number; quality: string; notes: number } | null>(null);
   const [judgment, setJudgment] = useState<{ text: string; kind: string; id: number } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<GameSettingsData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // §21: brief camera-name indicator when the mode changes
@@ -149,6 +165,11 @@ export default function GameView() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // settings: hydrate once from the store (persisted in localStorage)
+  useEffect(() => {
+    if (gameRef.current && settings === null) setSettings({ ...gameRef.current.settings.current });
+  }, [settings]);
+
   const runSearch = useCallback(async () => {
     const q = searchQuery.trim();
     if (!q) return;
@@ -184,6 +205,17 @@ export default function GameView() {
   const riding = state === 'playing' || state === 'countdown';
   const paused = state === 'paused';
   const playingState = state === 'playing';
+  const menuOpen = state === 'menu' || state === 'search';
+  void playingState;
+
+  /** update one setting and push it into the live engine immediately */
+  const setSetting = useCallback(<K extends keyof GameSettingsData>(key: K, value: GameSettingsData[K]) => {
+    const game = gameRef.current;
+    if (!game) return;
+    game.settings.update(key, value);
+    setSettings({ ...game.settings.current });
+    game.applySettings(game.settings.current);
+  }, []);
 
   const judgmentColor = (kind: string) =>
     kind === 'gatePerfect' ? 'text-cyan-300' : kind === 'gateGood' ? 'text-sky-200' : 'text-red-400';
@@ -288,6 +320,26 @@ export default function GameView() {
             {tel.section.toUpperCase()} · {Math.round(tel.bpm)} BPM
           </div>
 
+          {/* §17 RHYTHM PACE — guidance only, never moves gates. Negative Δ =
+              bike is AHEAD of the pace line (arrive early), positive = LATE. */}
+          {tel.debug.nextGateTime > 0 && riding && (() => {
+            const paceDelta = tel.debug.playerS - tel.debug.trackOrigin - tel.debug.audioTime * (tel.rhythmSpeedKmh / 3.6);
+            const paceSec = paceDelta / Math.max(8, (tel.rhythmSpeedKmh / 3.6));
+            const ahead = paceSec < -0.05;
+            const late = paceSec > 0.05;
+            return (
+              <div className="pointer-events-none absolute right-5 top-1/2 -translate-y-1/2 text-right font-mono">
+                <div className="text-[9px] tracking-[0.3em] text-white/35">RHYTHM PACE</div>
+                <div className={`text-lg font-black tabular-nums ${ahead ? 'text-cyan-300' : late ? 'text-amber-300' : 'text-emerald-300'}`}>
+                  {ahead ? 'AHEAD' : late ? 'LATE' : 'ON TIME'}
+                </div>
+                <div className="text-[11px] tabular-nums text-white/50">
+                  {paceSec >= 0 ? '+' : ''}{paceSec.toFixed(2)}s
+                </div>
+              </div>
+            );
+          })()}
+
           {/* camera mode indicator — fades quickly (§21) */}
           {camLabel && (
             <div
@@ -320,8 +372,10 @@ export default function GameView() {
               <div>bpm {tel.bpm.toFixed(1)} · sub {tel.debug.subdivision}/8 · {tel.analysisQuality}</div>
               <div>speed {Math.round(tel.speedKmh)} km/h · gear {tel.gearLabel} · lane x {tel.debug.laneX.toFixed(2)}m</div>
               <div>s {tel.debug.playerS}m · dist {tel.debug.distanceKm.toFixed(2)}km</div>
-              <div>gates active {tel.debug.activeGates} · next t {tel.debug.nextGateTime.toFixed(3)}</div>
+              <div>gates active {tel.debug.activeGates} · next t {tel.debug.nextGateTime.toFixed(3)} (lane {tel.debug.gateLane}, x {tel.debug.gateLaneX.toFixed(2)}m, s {tel.debug.gateS}m)</div>
               <div>gate Δ {tel.debug.gateDelta.toFixed(3)}s</div>
+              <div className="mt-1 border-t border-cyan-400/20 pt-1 text-cyan-200">SWEEP · prev audio {tel.debug.prevAudioT.toFixed(3)} → cur {tel.debug.audioTime.toFixed(3)} · prev s {tel.debug.prevBikeS} → cur {tel.debug.playerS}m</div>
+              <div>last cross · α {tel.debug.crossAlpha.toFixed(2)} · audio {tel.debug.crossAudio.toFixed(3)} · Δ {tel.debug.crossDelta >= 0 ? '+' : ''}{tel.debug.crossDelta.toFixed(3)}s · laneOff {tel.debug.crossLaneOffset.toFixed(2)}m · {tel.debug.crossJudgment}</div>
               <div>combo {tel.combo} · ×{tel.multiplier.toFixed(2)} · hp {tel.hp.toFixed(0)}</div>
               <div>biome {tel.biome} · section {tel.section}</div>
             </div>
@@ -472,87 +526,84 @@ export default function GameView() {
       )}
 
       {/* ------------------------------------------------------ MENU + SEARCH */}
-      {(state === 'menu' || state === 'search') && (
+      {menuOpen && (
         <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-black/70 via-black/40 to-black/85 backdrop-blur-[2px]">
           <div className="mx-4 grid w-full max-w-4xl gap-6 md:grid-cols-[1.05fr_1fr]">
             {/* left: identity + start */}
             <div className="rounded-2xl border border-white/10 bg-black/60 p-7 shadow-2xl">
-              <div className="mb-1 font-mono text-[10px] tracking-[0.5em] text-amber-400/80">BEAT FOR SPEED · RHYTHM RACING</div>
-              <h1 className="mb-2 text-4xl font-black tracking-tight text-white">
-                NEON <span className="text-cyan-300">VELOCITY</span>
+              <div className="mb-1 font-ui text-[10px] font-semibold uppercase tracking-[0.5em] text-amber-400/80">Beat for Speed · Rhythm Racing</div>
+              <h1 className="font-display mb-2 text-5xl font-black italic tracking-tight text-white">
+                NEON <span className="bg-gradient-to-r from-cyan-300 to-sky-400 bg-clip-text text-transparent">VELOCITY</span>
               </h1>
-              <p className="mb-5 text-sm leading-relaxed text-white/60">
+              <p className="font-ui mb-5 text-sm leading-relaxed text-white/60">
                 320 km/h lane-splitting where the highway <span className="text-cyan-200">is</span> the rhythm: every gate,
                 environment cut and camera kick rides your song&apos;s beat. Thread PERFECT gates, keep the combo, don&apos;t
                 touch the traffic.
               </p>
 
-              <div className="mb-5 grid grid-cols-2 gap-x-6 gap-y-1.5 font-mono text-xs text-white/55">
-                <div><span className="text-white/90">W / ↑</span> throttle</div>
-                <div><span className="text-white/90">S / ↓</span> brake</div>
-                <div><span className="text-white/90">A D / ← →</span> steer &amp; lean</div>
-                <div><span className="text-white/90">SHIFT / L3</span> aero tuck</div>
-                <div><span className="text-white/90">C / Y</span> cockpit ↔ chase</div>
-                <div><span className="text-white/90">ESC / START</span> pause</div>
+              <div className="mb-5 grid grid-cols-2 gap-x-6 gap-y-1.5 font-ui text-xs text-white/55">
+                <div><span className="font-semibold text-white/90">W / ↑</span> throttle</div>
+                <div><span className="font-semibold text-white/90">S / ↓</span> brake</div>
+                <div><span className="font-semibold text-white/90">A D / ← →</span> steer &amp; lean</div>
+                <div><span className="font-semibold text-white/90">SHIFT / L3</span> aero tuck</div>
+                <div><span className="font-semibold text-white/90">C / Y</span> cycle camera</div>
+                <div><span className="font-semibold text-white/90">ESC / START</span> pause</div>
               </div>
 
-              <div className="mb-6 rounded-xl border border-cyan-300/20 bg-cyan-400/5 p-4">
-                <div className="mb-2 flex items-center gap-2 font-mono text-[11px] tracking-widest text-cyan-200/80">
-                  <Music2 className="h-4 w-4" /> SOUNDTRACK
-                </div>
-                <div className="mb-3 font-mono text-[11px] leading-relaxed text-white/45">
-                  Search a real track — it&apos;s streamed, decoded and beat-analyzed into your run. Or ride the built-in
-                  synthwave. Local MP3/WAV also supported.
-                </div>
-                <div className="flex flex-col gap-2">
-                  <Button
-                    onClick={() => gameRef.current?.openSearch()}
-                    className="w-full bg-cyan-500 font-mono text-sm font-bold tracking-[0.25em] text-black hover:bg-cyan-400"
-                  >
-                    <Search className="mr-2 h-4 w-4" /> SEARCH YOUTUBE
-                  </Button>
-                  <Button
-                    onClick={() => fileInputRef.current?.click()}
-                    variant="outline"
-                    className="w-full border-white/15 font-mono text-xs text-white/70 hover:text-white"
-                  >
-                    <Upload className="mr-2 h-4 w-4" /> USE LOCAL FILE
-                  </Button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onUpload(f);
-                      e.target.value = '';
-                    }}
-                  />
-                  <Button
-                    onClick={() => void gameRef.current?.startDemo()}
-                    variant="outline"
-                    className="w-full border-amber-400/30 font-mono text-xs text-amber-200/90 hover:bg-amber-400/10 hover:text-amber-100"
-                  >
-                    <Play className="mr-2 h-4 w-4" /> QUICK RIDE — DEMO TRACK
-                  </Button>
-                </div>
+              <div className="mb-6 flex flex-col gap-2">
+                <Button
+                  onClick={() => void gameRef.current?.startDemo()}
+                  className="h-12 w-full bg-cyan-400 font-display text-base font-black italic tracking-widest text-black shadow-[0_0_28px_rgba(56,208,255,0.35)] hover:bg-cyan-300"
+                >
+                  <Play className="mr-2 h-5 w-5" /> QUICK RIDE
+                </Button>
+                <Button
+                  onClick={() => gameRef.current?.openSearch()}
+                  className="h-10 w-full bg-white/95 font-ui text-sm font-bold tracking-widest text-black hover:bg-white"
+                >
+                  <Search className="mr-2 h-4 w-4" /> SONG SELECT — YOUTUBE
+                </Button>
+                <Button
+                  onClick={() => fileInputRef.current?.click()}
+                  variant="outline"
+                  className="h-10 w-full border-white/20 bg-black/40 font-ui text-xs font-semibold tracking-widest text-white/85 hover:text-white"
+                >
+                  <Upload className="mr-2 h-4 w-4" /> LOCAL AUDIO FILE
+                </Button>
+                <Button
+                  onClick={() => setShowSettings(true)}
+                  variant="outline"
+                  className="h-10 w-full border-white/20 bg-black/40 font-ui text-xs font-semibold tracking-widest text-white/85 hover:text-white"
+                >
+                  <SettingsIcon className="mr-2 h-4 w-4" /> SETTINGS
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onUpload(f);
+                    e.target.value = '';
+                  }}
+                />
               </div>
 
-              <div className="font-mono text-[10px] leading-relaxed text-white/30">
+              <div className="font-ui text-[10px] leading-relaxed text-white/30">
                 Judging: PERFECT ±45 ms / ≤1.2 m · GOOD ±90 ms / ≤1.6 m · a miss costs −4 HP, a crash −25. Combos build
-                your multiplier up to ×2.00 at 100.
+                your multiplier up to ×2.00 at 100. Gates live at fixed road positions — you ride to the beat.
               </div>
             </div>
 
             {/* right: search panel (expanded in search state) */}
             <div className={`rounded-2xl border p-5 shadow-2xl transition ${state === 'search' ? 'border-cyan-300/40 bg-black/75' : 'border-white/10 bg-black/45'}`}>
               <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.3em] text-cyan-200/80">
+                <div className="flex items-center gap-2 font-ui text-[11px] font-semibold tracking-[0.3em] text-cyan-200/80">
                   <Youtube className="h-4 w-4 text-red-400" /> YOUTUBE SEARCH
                 </div>
                 {state === 'search' && (
-                  <button onClick={() => gameRef.current?.closeSearch()} className="font-mono text-[10px] text-white/40 hover:text-white">
+                  <button onClick={() => gameRef.current?.closeSearch()} className="font-ui text-[10px] text-white/40 hover:text-white">
                     ✕ close
                   </button>
                 )}
@@ -567,15 +618,15 @@ export default function GameView() {
                   }}
                   placeholder="song or artist… (enter to search)"
                   spellCheck={false}
-                  className="w-full rounded-lg border border-white/15 bg-black/60 px-3 py-2 font-mono text-xs text-white placeholder:text-white/25 focus:border-cyan-300/60 focus:outline-none"
+                  className="font-ui w-full rounded-lg border border-white/15 bg-black/60 px-3 py-2 text-xs text-white placeholder:text-white/25 focus:border-cyan-300/60 focus:outline-none"
                 />
-                <Button onClick={() => void runSearch()} disabled={searchState === 'loading'} className="bg-cyan-500 px-3 font-mono text-black hover:bg-cyan-400">
+                <Button onClick={() => void runSearch()} disabled={searchState === 'loading'} className="bg-cyan-500 px-3 font-ui font-bold text-black hover:bg-cyan-400">
                   {searchState === 'loading' ? '…' : 'GO'}
                 </Button>
               </div>
 
               {searchState === 'error' && (
-                <div className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 font-mono text-[11px] text-amber-200/90">
+                <div className="font-ui mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-[11px] text-amber-200/90">
                   {searchError}
                   <button onClick={() => void runSearch()} className="ml-2 underline hover:text-white">retry</button>
                 </div>
@@ -591,14 +642,14 @@ export default function GameView() {
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={item.thumbnail} alt="" className="h-11 w-20 flex-none rounded object-cover" loading="lazy" />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs font-semibold text-white/90">{item.title}</div>
-                      <div className="truncate font-mono text-[10px] text-white/40">{item.channel}</div>
+                      <div className="font-ui truncate text-xs font-semibold text-white/90">{item.title}</div>
+                      <div className="font-ui truncate text-[10px] text-white/40">{item.channel}</div>
                     </div>
                     <div className="flex-none font-mono text-[10px] tabular-nums text-white/50">{fmt(item.duration)}</div>
                   </button>
                 ))}
                 {searchState === 'idle' && searchResults.length === 0 && (
-                  <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4 font-mono text-[11px] leading-relaxed text-white/35">
+                  <div className="font-ui rounded-lg border border-white/10 bg-white/[0.02] p-4 text-[11px] leading-relaxed text-white/35">
                     Real YouTube results via the server&apos;s yt-dlp backend — thumbnails, channels and durations included.
                     Pick a track and the engine analyzes its beat map into a live rhythm chart.
                   </div>
@@ -608,6 +659,162 @@ export default function GameView() {
           </div>
         </div>
       )}
+
+      {/* ------------------------------------------------------ SETTINGS */}
+      {showSettings && settings && <SettingsPanel settings={settings} onChange={setSetting} onClose={() => setShowSettings(false)} />}
     </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings screen — every control is wired through applySettings.     */
+/* ------------------------------------------------------------------ */
+
+function SettingsRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2">
+      <div className="min-w-0">
+        <div className="font-ui text-xs font-semibold text-white/85">{label}</div>
+        {hint && <div className="font-ui text-[10px] text-white/35">{hint}</div>}
+      </div>
+      <div className="flex w-44 flex-none items-center gap-2">{children}</div>
+    </div>
+  );
+}
+
+function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={`h-6 w-11 flex-none rounded-full border transition ${on ? 'border-cyan-300/70 bg-cyan-400/80' : 'border-white/25 bg-white/10'}`}
+      aria-pressed={on}
+    >
+      <span className={`block h-4 w-4 rounded-full bg-white shadow transition ${on ? 'translate-x-6' : 'translate-x-1'}`} />
+    </button>
+  );
+}
+
+function SettingsPanel({
+  settings,
+  onChange,
+  onClose,
+}: {
+  settings: GameSettingsData;
+  onChange: <K extends keyof GameSettingsData>(key: K, value: GameSettingsData[K]) => void;
+  onClose: () => void;
+}) {
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+      <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-cyan-300/25 bg-zinc-950/95 p-6 shadow-2xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="font-display text-2xl font-black italic tracking-tight text-white">
+            SETTINGS
+          </h2>
+          <button onClick={onClose} className="font-ui rounded-lg border border-white/15 px-3 py-1.5 text-xs font-semibold text-white/70 hover:text-white">
+            DONE
+          </button>
+        </div>
+
+        <div className="mb-2 font-ui text-[10px] font-bold uppercase tracking-[0.3em] text-cyan-300/80">Controls</div>
+        <SettingsRow label="Steering sensitivity" hint="how fast full lock is reached">
+          <Slider value={[settings.steerSens]} min={0.4} max={2} step={0.05} onValueChange={(v) => onChange('steerSens', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.steerSens.toFixed(2)}</span>
+        </SettingsRow>
+        <SettingsRow label="Steering response" hint="smoothing rate — snappier vs smoother">
+          <Slider value={[settings.steerResponse]} min={0.4} max={2} step={0.05} onValueChange={(v) => onChange('steerResponse', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.steerResponse.toFixed(2)}</span>
+        </SettingsRow>
+        <SettingsRow label="Throttle sensitivity">
+          <Slider value={[settings.throttleSens]} min={0.4} max={2} step={0.05} onValueChange={(v) => onChange('throttleSens', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.throttleSens.toFixed(2)}</span>
+        </SettingsRow>
+        <SettingsRow label="Brake sensitivity">
+          <Slider value={[settings.brakeSens]} min={0.4} max={2} step={0.05} onValueChange={(v) => onChange('brakeSens', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.brakeSens.toFixed(2)}</span>
+        </SettingsRow>
+        <SettingsRow label="Camera response" hint="lean-roll transfer into the view">
+          <Slider value={[settings.camSens]} min={0.4} max={2} step={0.05} onValueChange={(v) => onChange('camSens', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.camSens.toFixed(2)}</span>
+        </SettingsRow>
+        <SettingsRow label="Controller deadzone">
+          <Slider value={[settings.deadzone]} min={0} max={0.4} step={0.01} onValueChange={(v) => onChange('deadzone', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{Math.round(settings.deadzone * 100)}%</span>
+        </SettingsRow>
+        <SettingsRow label="Invert steering">
+          <Toggle on={settings.invertSteer} onToggle={() => onChange('invertSteer', !settings.invertSteer)} />
+        </SettingsRow>
+
+        <div className="mb-2 mt-5 font-ui text-[10px] font-bold uppercase tracking-[0.3em] text-cyan-300/80">Audio</div>
+        <SettingsRow label="Master volume">
+          <Slider value={[settings.masterVolume]} min={0} max={1} step={0.05} onValueChange={(v) => onChange('masterVolume', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{pct(settings.masterVolume)}</span>
+        </SettingsRow>
+        <SettingsRow label="Music">
+          <Slider value={[settings.musicVolume]} min={0} max={1} step={0.05} onValueChange={(v) => onChange('musicVolume', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{pct(settings.musicVolume)}</span>
+        </SettingsRow>
+        <SettingsRow label="Engine / bike">
+          <Slider value={[settings.engineVolume]} min={0} max={1} step={0.05} onValueChange={(v) => onChange('engineVolume', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{pct(settings.engineVolume)}</span>
+        </SettingsRow>
+        <SettingsRow label="Effects (crash / near-miss)">
+          <Slider value={[settings.sfxVolume]} min={0} max={1} step={0.05} onValueChange={(v) => onChange('sfxVolume', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{pct(settings.sfxVolume)}</span>
+        </SettingsRow>
+        <SettingsRow label="Hit feedback (gate ping)">
+          <Slider value={[settings.hudVolume]} min={0} max={1} step={0.05} onValueChange={(v) => onChange('hudVolume', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{pct(settings.hudVolume)}</span>
+        </SettingsRow>
+
+        <div className="mb-2 mt-5 font-ui text-[10px] font-bold uppercase tracking-[0.3em] text-cyan-300/80">Graphics</div>
+        <SettingsRow label="Quality" hint="resolution scale, shadows, MSAA">
+          <div className="flex w-full gap-1">
+            {(['LOW', 'MED', 'HIGH'] as const).map((q, i) => (
+              <button
+                key={q}
+                onClick={() => onChange('quality', i as 0 | 1 | 2)}
+                className={`font-ui flex-1 rounded-md border px-2 py-1 text-[10px] font-bold tracking-wider transition ${
+                  settings.quality === i ? 'border-cyan-300/70 bg-cyan-400/20 text-cyan-100' : 'border-white/15 text-white/50 hover:text-white'
+                }`}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+        <SettingsRow label="Bloom">
+          <Toggle on={settings.bloom} onToggle={() => onChange('bloom', !settings.bloom)} />
+        </SettingsRow>
+        <SettingsRow label="Motion blur">
+          <Toggle on={settings.motionBlur} onToggle={() => onChange('motionBlur', !settings.motionBlur)} />
+        </SettingsRow>
+        <SettingsRow label="Reflections" hint="wet-road environment reflections">
+          <Toggle on={settings.reflections} onToggle={() => onChange('reflections', !settings.reflections)} />
+        </SettingsRow>
+        <SettingsRow label="Mirror quality">
+          <div className="flex w-full gap-1">
+            {(['OFF', 'LOW', 'MED', 'HIGH'] as const).map((q, i) => (
+              <button
+                key={q}
+                onClick={() => onChange('mirrorQuality', ['off', 'low', 'medium', 'high'][i] as GameSettingsData['mirrorQuality'])}
+                className={`font-ui flex-1 rounded-md border px-1.5 py-1 text-[10px] font-bold tracking-wider transition ${
+                  settings.mirrorQuality === ['off', 'low', 'medium', 'high'][i] ? 'border-cyan-300/70 bg-cyan-400/20 text-cyan-100' : 'border-white/15 text-white/50 hover:text-white'
+                }`}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+        <SettingsRow label="Field of view" hint={`base ${Math.round(87 + settings.fovOffset)}°`}>
+          <Slider value={[settings.fovOffset]} min={-10} max={10} step={1} onValueChange={(v) => onChange('fovOffset', v[0])} />
+          <span className="font-mono w-9 text-right text-[10px] text-white/60">{settings.fovOffset > 0 ? `+${settings.fovOffset}` : settings.fovOffset}</span>
+        </SettingsRow>
+        <SettingsRow label="FPS counter">
+          <Toggle on={settings.showFps} onToggle={() => onChange('showFps', !settings.showFps)} />
+        </SettingsRow>
+      </div>
+    </div>
   );
 }
