@@ -199,6 +199,7 @@ export class WeatherController {
 
   private sun: THREE.DirectionalLight;
   private ambient: THREE.AmbientLight;
+  private hemi: THREE.HemisphereLight;
   private sunGlare: THREE.Sprite;
 
   // particles
@@ -318,6 +319,11 @@ export class WeatherController {
     scene.add(this.sun.target);
     this.ambient = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(this.ambient);
+    // sky/ground bounce: gives asphalt a grazing-angle floor term so the
+    // road reads as a surface, not a black void, when the sun is at the
+    // horizon (N·L ≈ 0 for a flat deck)
+    this.hemi = new THREE.HemisphereLight(0xffffff, 0x101014, 0.35);
+    scene.add(this.hemi);
 
     this.pmrem = new THREE.PMREMGenerator(renderer);
 
@@ -562,12 +568,14 @@ export class WeatherController {
     // traffic headlight cones + wet asphalt + lamp emission (cheap global tweaks)
     traffic.headlightsOn = this.headlightsOn;
     const wet = this.current.wetness;
-    this.mats.asphalt.roughness = lerp(0.93, 0.08, wet);
-    this.mats.asphalt.metalness = lerp(0.02, 0.62, wet);
-    this.mats.asphalt.envMapIntensity = lerp(0.25, 1.7, wet);
-    this.mats.asphaltOncoming.roughness = lerp(0.95, 0.1, wet);
-    this.mats.asphaltOncoming.metalness = lerp(0.0, 0.5, wet);
-    this.mats.asphaltOncoming.envMapIntensity = lerp(0.2, 1.2, wet);
+    // wet asphalt: keep roughness believable (asphalt, not a mirror) — sharp
+    // sheen comes from envMapIntensity + the light pools, not zero roughness
+    this.mats.asphalt.roughness = lerp(0.93, 0.28, wet);
+    this.mats.asphalt.metalness = lerp(0.02, 0.42, wet);
+    this.mats.asphalt.envMapIntensity = lerp(0.25, 1.55, wet);
+    this.mats.asphaltOncoming.roughness = lerp(0.95, 0.32, wet);
+    this.mats.asphaltOncoming.metalness = lerp(0.0, 0.34, wet);
+    this.mats.asphaltOncoming.envMapIntensity = lerp(0.2, 1.1, wet);
 
     // env refresh: only while the sky is transitioning, plus a rare top-up
     this.envRefreshTimer += dt;
@@ -747,14 +755,25 @@ export class WeatherController {
     }
 
     this.sun.color.copy(c.sunLightColor);
-    this.sun.intensity = c.sunLightIntensity;
+    // Grazing-angle compensation: when the sun sits near the horizon (dusk /
+    // golden hour) a flat asphalt deck has N·L ≈ 0 and renders black. Blend
+    // the directional intensity toward a floor term as elevation drops so the
+    // road keeps a readable base level at every preset.
+    const sunElev = clamp(c.sunDir.y, 0, 1);
+    const grazingFloor = (1 - clamp(sunElev / 0.3, 0, 1)) * 0.5;
+    this.sun.intensity = c.sunLightIntensity + grazingFloor;
     this.ambient.color.copy(c.ambientColor);
     this.ambient.intensity = c.ambientIntensity;
+    // hemisphere sky/ground bounce tracks the ambient, scaled by sun height
+    // (deep night leans on lamp pools + headlight instead of fake moonlight)
+    this.hemi.color.copy(c.zenith).multiplyScalar(1.6);
+    this.hemi.groundColor.copy(c.ambientColor).multiplyScalar(0.3);
+    this.hemi.intensity = c.ambientIntensity * (0.35 + 0.65 * clamp(sunElev / 0.3, 0, 1)) * 0.5;
     this.sun.castShadow = c.sunLightIntensity > 0.5;
 
     // shared highway materials
     this.mats.lampCone.opacity = c.lampCone;
-    this.mats.lampPool.opacity = c.lampPool;
+    this.mats.lampPool.opacity = c.lampPool * 1.7;
     this.mats.lampHead.color.setRGB(
       clamp(0.55 + c.windowEmissive * 0.45, 0, 1.6),
       clamp(0.42 + c.windowEmissive * 0.22, 0, 1.2),

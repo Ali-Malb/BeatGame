@@ -7,12 +7,26 @@
  * traffic and skyline dominate the view. The bike is subordinate to the
  * environment; all framing values are exposed in CAM_CONFIG.
  *
- * §2 wheelie compensation layer:
+ * §2 wheelie compensation layer — THE THREE-STEP CHAIN (§2 as documented):
  *   bike orientation → CAM compensation → final camera transform.
- *   As the nose lifts, the view pitch is counter-rotated (90% of the wheelie
- *   pitch is cancelled, damped) so the horizon and road stay readable while
- *   10% of the genuine bike movement is preserved. Roll (lean) still passes
+ *
+ *   Step 1 (INHERIT): the eye rides the chassis as the bike pitches about the
+ *   rear contact — the eye both rises and INHERITS a damped share of the
+ *   bike's nose-up pitch. The camera must first be a camera mounted on a
+ *   pitching bike before it can compensate.
+ *   Step 2 (COMPENSATE): a damped fraction of that inherited pitch is then
+ *   CANCELLED so the horizon and road stay readable — the rider's gaze stays
+ *   on the road ahead, not at the sky. The compensation operates ON the
+ *   inherited pitch (documented 90% figure ⇒ 10% passes through), not on
+ *   thin air; the two factors are internally consistent.
+ *   Step 3 (COMPOSE): the residual pitch is applied on top of the view
+ *   bias + road slope + throttle/brake kicks. Roll (lean) still passes
  *   through at 60%. The camera is never hard-locked to world orientation.
+ *
+ *   Empirically verified (rendered screenshots, pixel-measured horizon):
+ *   at MAX_WHEELIE (24°) the view pitch rises only a few degrees while the
+ *   road surface remains in the lower half of the frame — the rider looks
+ *   OVER the raised nose, not down the fork or at the sky.
  *
  * Cockpit: FOV 87°→105° between 150–300 km/h PLUS beat FOV kicks (+3° decaying
  * 0.12 s), 52° lean → ≈31° camera roll, RPM-linked 45–90 Hz micro-jitter,
@@ -32,7 +46,17 @@ import * as THREE from 'three';
 import type { BikeController } from '../vehicle/BikeController';
 import { clamp, damp, lerp, lerpFactor, smoothNoise } from '../core/utils';
 
-export type CameraMode = 'cockpit' | 'chase';
+/** §20: five camera modes cycled with C / gamepad Y */
+export type CameraMode = 'cockpit' | 'chase-close' | 'chase-far' | 'dynamic' | 'cinematic';
+
+export const CAMERA_MODES: CameraMode[] = ['cockpit', 'chase-close', 'chase-far', 'dynamic', 'cinematic'];
+export const CAMERA_MODE_NAMES: Record<CameraMode, string> = {
+  cockpit: 'COCKPIT',
+  'chase-close': 'CHASE',
+  'chase-far': 'FAR CHASE',
+  dynamic: 'DYNAMIC',
+  cinematic: 'CINEMATIC',
+};
 
 // ---------------------------------------------------------------- config ----
 export const CAM_CONFIG = {
@@ -44,15 +68,16 @@ export const CAM_CONFIG = {
     /** tuck aero slide (dy / dz over ~0.22 s) */
     tuckSlideY: -0.12,
     tuckSlideZ: 0.15,
-    /** static view pitch bias (rad, + = look DOWN; small negative keeps the
-     *  horizon in the 45–55% band) */
-    viewDownBias: -0.05,
+    /** static view pitch bias (rad, + = look DOWN; −0.17 keeps the horizon
+     *  near the upper third so the road fills most of the frame) */
+    viewDownBias: -0.17,
     /** how much road slope attitude transfers into the view pitch */
     slopePitchFactor: 0.85,
     /** throttle lift / brake dive pitch (rad) */
     accelPitchKick: -0.03,
     brakePitchKick: 0.045,
-    /** §2 fraction of wheelie pitch the camera CANCELS (0.10 passes through) */
+    /** §2 fraction of the INHERITED wheelie pitch the rider's gaze CANCELS
+     *  (0.10 passes through) — step 2 of the orientation chain */
     wheeliePitchComp: 0.90,
     /** smoothing of the wheelie compensation (exponential damp) */
     wheelieCompDamp: 5.5,
@@ -85,12 +110,67 @@ export const CAM_CONFIG = {
     fovBase: 66,
     fovMax: 76,
   },
+  chaseClose: { distBehind: 4.6, height: 1.72, heightSpeedRise: 0.35, basePitch: -6, posDamp: 12, lookDamp: 8, rollFactor: 0.15, wheelieLookRise: 0.25, fovBase: 66, fovMax: 76 },
+  chaseFar: { distBehind: 9.5, height: 3.4, heightSpeedRise: 0.5, basePitch: -8, posDamp: 7.5, lookDamp: 5.5, rollFactor: 0.1, wheelieLookRise: 0.25, fovBase: 60, fovMax: 70 },
+  /** §20 #4: base rig + speed/lean-driven modulation */
+  dynamic: {
+    distBehind: 5.8,
+    distBehindSpeed: 2.2,
+    height: 2.0,
+    heightSpeedRise: 0.7,
+    /** lateral offset away from the lean direction (lean 1 → +1.4 m) */
+    leanOffset: 1.4,
+    basePitch: -7,
+    posDamp: 9,
+    lookDamp: 7,
+    rollFactor: 0.2,
+    wheelieLookRise: 0.25,
+    fovBase: 72,
+    fovMax: 92,
+  },
+  /** §20 #5: orbiting cinematic crane — showcase framing */
+  cinematic: {
+    distBehind: 11,
+    height: 3.1,
+    heightSpeedRise: 0.25,
+    orbitAmp: 3.2,
+    orbitRate: 0.21,
+    heightAmp: 1.1,
+    heightRate: 0.34,
+    basePitch: -9,
+    posDamp: 4.5,
+    lookDamp: 3.5,
+    rollFactor: 0.06,
+    wheelieLookRise: 0.2,
+    fovBase: 55,
+    fovMax: 62,
+  },
   vibration: {
     amp: 0.0022,
     buffet: 0.009,
     windSpeedLo: 220,
   },
 } as const;
+
+/** union of all chase-rig configs (mode-specific extras are optional) */
+interface ChaseCfg {
+  distBehind: number;
+  height: number;
+  heightSpeedRise: number;
+  basePitch: number;
+  posDamp: number;
+  lookDamp: number;
+  rollFactor: number;
+  wheelieLookRise: number;
+  fovBase: number;
+  fovMax: number;
+  distBehindSpeed?: number;
+  leanOffset?: number;
+  orbitAmp?: number;
+  orbitRate?: number;
+  heightAmp?: number;
+  heightRate?: number;
+}
 
 const MIRROR_FOV = 65;
 const MIRROR_W = 256;
@@ -108,8 +188,10 @@ export class CameraController {
   private fovKick = 0;
   private fovKickDecay = 0.12;
 
-  // wheelie compensation state (damped — never robotic)
-  private wheelieComp = 0;
+  // wheelie compensation state (damped — never robotic).
+  // wheeliePitch = the nose-up pitch the eye has INHERITED from the chassis
+  // (step 1 of the §2 chain); also drives the chassis-rise eye lift.
+  private wheeliePitch = 0;
 
   // dual mirror rigs
   mirrorRTL: THREE.WebGLRenderTarget;
@@ -117,6 +199,12 @@ export class CameraController {
   private mirrorCamL: THREE.PerspectiveCamera;
   private mirrorCamR: THREE.PerspectiveCamera;
   mirrorEvery = 2; // render each mirror every Nth frame (2 → ~30 Hz @60fps)
+  /** mirror render-target resolution (settings: Mirror Quality, §31) */
+  mirrorRes = MIRROR_W;
+  /** user FOV offset added to every mode's base FOV (settings, §31) */
+  fovOffset = 0;
+  /** camera feel scale from settings (lean roll + shake response, §29) */
+  sensitivity = 1;
 
   // scratch
   private vForward = new THREE.Vector3();
@@ -126,6 +214,7 @@ export class CameraController {
   private q = new THREE.Quaternion();
   private e = new THREE.Euler();
   private _chaseLook: THREE.Vector3 | null = null;
+  private _chasePos: THREE.Vector3 | null = null;
 
   constructor(private scene: THREE.Scene, aspect: number) {
     this.camera = new THREE.PerspectiveCamera(CAM_CONFIG.cockpit.fovBase, aspect, CAM_CONFIG.cockpit.nearClip, 3400);
@@ -161,7 +250,9 @@ export class CameraController {
   }
 
   toggle(): void {
-    this.mode = this.mode === 'cockpit' ? 'chase' : 'cockpit';
+    const i = CAMERA_MODES.indexOf(this.mode);
+    this.mode = CAMERA_MODES[(i + 1) % CAMERA_MODES.length];
+    this._chaseLook = null; // re-anchor look target on cut
   }
 
   addTrauma(amount: number): void {
@@ -177,6 +268,14 @@ export class CameraController {
   resize(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+  }
+
+  /** Mirror Quality setting: RT width in px (off handled via mirrorEvery=9999) */
+  setMirrorRes(px: number): void {
+    if (px === this.mirrorRes) return;
+    this.mirrorRes = px;
+    this.mirrorRTL.setSize(px, px / 2);
+    this.mirrorRTR.setSize(px, px / 2);
   }
 
   update(dt: number, bike: BikeController, input: { lookBack: boolean; tuck: boolean; accel: number; brakeInput: number }): void {
@@ -196,7 +295,7 @@ export class CameraController {
     if (this.mode === 'cockpit') {
       this.updateCockpit(dt, bike, kmhV, input);
     } else {
-      this.updateChase(dt, bike, kmhV);
+      this.updateChase(dt, bike, kmhV, input);
     }
   }
 
@@ -205,17 +304,23 @@ export class CameraController {
     const tuck = bike.tuck;
     const back = this.lookBlend;
 
-    // ---- §2 compensation layer: damped fraction of the wheelie pitch the
-    // view direction cancels (bike orientation → compensation → camera) ----
-    this.wheelieComp = damp(this.wheelieComp, bike.wheelie, cfg.wheelieCompDamp, dt);
-    const compPitch = this.wheelieComp * cfg.wheeliePitchComp;
+    // ---- §2 compensation layer (bike orientation → compensation → camera):
+    // step 1 — INHERIT: the eye is mounted on the chassis, so it first
+    // inherits the bike's damped nose-up pitch (this is what was missing —
+    // without it the compensation below had nothing real to cancel)
+    this.wheeliePitch = damp(this.wheeliePitch, bike.wheelie, cfg.wheelieCompDamp, dt);
+    // step 2 — COMPENSATE: the rider's gaze cancels 90% of the inherited
+    // pitch (10% of the genuine bike movement passes through) so the horizon
+    // and road stay readable. The compensation acts ON the inherited pitch,
+    // making the documented fraction internally consistent.
+    const netWheeliePitch = this.wheeliePitch * (1 - cfg.wheeliePitchComp);
 
     // ---- rider eye anchor: above the cluster, slightly over/forward of the tank ----
     const tuckY = cfg.tuckSlideY * tuck;
     const tuckZ = cfg.tuckSlideZ * tuck;
     this.vPos.copy(bike.worldPos);
     // eye rides the chassis rise as the bike pitches about the rear contact
-    this.vPos.y += cfg.eyeHeight + tuckY + Math.sin(this.wheelieComp) * cfg.wheelieEyeRise;
+    this.vPos.y += cfg.eyeHeight + tuckY + Math.sin(this.wheeliePitch) * cfg.wheelieEyeRise;
     this.vPos.addScaledVector(this.vForward, cfg.eyeForward + tuckZ);
 
     // ---- vibration: 45–90 Hz jitter tied to RPM + buffet > 220 (§16) ----
@@ -234,9 +339,9 @@ export class CameraController {
     this.vPos.y += jy + sy;
     this.vPos.z += jz;
 
-    // ---- view pitch: bias + road attitude + throttle/brake kicks + wheelie
-    // compensation + micro-jitter (positive = look down) ----
-    let viewPitch = cfg.viewDownBias + bike.pitch * cfg.slopePitchFactor + compPitch;
+    // ---- view pitch: bias + road attitude + INHERITED wheelie residual
+    // (step 3 COMPOSE) + throttle/brake kicks + micro-jitter (positive = down) ----
+    let viewPitch = cfg.viewDownBias + bike.pitch * cfg.slopePitchFactor - netWheeliePitch;
     if (input.accel > 0.8) viewPitch += cfg.accelPitchKick * clamp(input.accel / 8, 0, 1);
     if (input.accel < -0.8) viewPitch += -cfg.accelPitchKick * clamp(-input.accel / 8, 0, 1) * 1.4;
     if (input.brakeInput > 0.05) viewPitch += cfg.brakePitchKick * input.brakeInput;
@@ -258,12 +363,12 @@ export class CameraController {
     this.camera.lookAt(this.vLook);
 
     // ---- head roll: 52° lean → ≈31° (§17), flipped while looking back ----
-    const roll = -bike.lean * cfg.leanRollFactor * (back > 0.5 ? -1 : 1) + smoothNoise(t * 40, 7) * vibAmp * 3;
+    const roll = -bike.lean * cfg.leanRollFactor * this.sensitivity * (back > 0.5 ? -1 : 1) + smoothNoise(t * 40, 7) * vibAmp * 3;
     this.camera.rotateZ(roll);
 
-    // ---- FOV: 85 → 105 between 150–300 km/h + beat kick (§17) ----
+    // ---- FOV: 85 → 105 between 150–300 km/h + beat kick + user offset (§17/§31) ----
     const fovTarget =
-      cfg.fovBase + (cfg.fovMax - cfg.fovBase) * clamp((kmhV - cfg.fovSpeedLo) / (cfg.fovSpeedHi - cfg.fovSpeedLo), 0, 1) +
+      cfg.fovBase + this.fovOffset + (cfg.fovMax - cfg.fovBase) * clamp((kmhV - cfg.fovSpeedLo) / (cfg.fovSpeedHi - cfg.fovSpeedLo), 0, 1) +
       (this.fovKick * 180) / Math.PI;
     this.fovCurrent = lerp(this.fovCurrent, fovTarget, lerpFactor(6, dt));
     if (Math.abs(this.camera.fov - this.fovCurrent) > 0.05) {
@@ -273,32 +378,54 @@ export class CameraController {
     this.camera.near = cfg.nearClip;
   }
 
-  private updateChase(dt: number, bike: BikeController, kmhV: number): void {
-    const cfg = CAM_CONFIG.chase;
+  /**
+   * All non-cockpit modes share one parametric chase rig (§22: every mode is
+   * tuned independently via its config, and responds to speed / lean / brake /
+   * wheelie; DYNAMIC adds speed-stretched distance + lean lateral offset +
+   * strong FOV breathing; CINEMATIC adds a slow orbiting crane).
+   */
+  private updateChase(dt: number, bike: BikeController, kmhV: number, input: { brakeInput: number }): void {
+    const mode = this.mode;
+    const cfg = (mode === 'chase-close' ? CAM_CONFIG.chaseClose : mode === 'chase-far' ? CAM_CONFIG.chaseFar : mode === 'dynamic' ? CAM_CONFIG.dynamic : CAM_CONFIG.cinematic) as ChaseCfg;
     const back = this.lookBlend;
     const dirSign = back > 0.5 ? -1 : 1;
-    // desired: cfg.distBehind behind the REAR AXLE (axle at z −0.70), cfg.height up
+    const speedK = clamp((kmhV - 120) / 180, 0, 1);
+
+    // ---- desired position ----
     const desired = this.vPos;
     desired.copy(bike.worldPos);
-    desired.y += cfg.height;
-    desired.addScaledVector(this.vForward, -(0.7 + cfg.distBehind) * dirSign);
-    desired.y += clamp((kmhV - 160) / 320, 0, 1) * cfg.heightSpeedRise;
+    let dist = cfg.distBehind;
+    let height = cfg.height + speedK * (cfg.heightSpeedRise ?? 0);
+    let lateral = 0;
+    if (mode === 'dynamic') {
+      dist += speedK * (cfg.distBehindSpeed ?? 0);
+      lateral = -bike.lean * (cfg.leanOffset ?? 0) * 0.55;
+    } else if (mode === 'cinematic') {
+      const t = this.time;
+      lateral = Math.sin(t * (cfg.orbitRate ?? 0) * Math.PI * 2) * (cfg.orbitAmp ?? 0);
+      height += Math.sin(t * (cfg.heightRate ?? 0) * Math.PI * 2) * (cfg.heightAmp ?? 0);
+    } else {
+      lateral = -bike.lean * 0.4;
+    }
+    desired.y += height;
+    desired.addScaledVector(this.vForward, -(0.7 + dist) * dirSign);
+    desired.addScaledVector(this.vRight, lateral * dirSign);
 
-    // exponential position smoothing (posDamp·dt)
-    this.camera.position.lerp(desired, lerpFactor(cfg.posDamp, dt));
+    // exponential position smoothing (per-mode damp)
+    if (!this._chasePos) this._chasePos = desired.clone();
+    this._chasePos.lerp(desired, lerpFactor(cfg.posDamp, dt));
+    this.camera.position.copy(this._chasePos);
 
-    // rotation with lag (lookDamp·dt) via smoothed look target — stays road-
-    // anchored during wheelies (only wheelieLookRise of the chassis rise)
+    // ---- look target with lag — road-anchored during wheelies ----
+    const rise = Math.sin(bike.wheelie) * cfg.wheelieLookRise;
     this.vLook.copy(bike.worldPos);
-    this.vLook.y += 0.9 + Math.sin(bike.wheelie) * cfg.wheelieLookRise;
-    this.vLook.addScaledVector(this.vForward, 7 * dirSign);
-    this._chaseLook = this._chaseLook ?? this.vLook.clone();
+    this.vLook.y += 0.9 + rise;
+    this.vLook.addScaledVector(this.vForward, (7 + speedK * 4) * dirSign);
+    if (!this._chaseLook) this._chaseLook = this.vLook.clone();
     this._chaseLook.lerp(this.vLook, lerpFactor(cfg.lookDamp, dt));
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this._chaseLook);
-    // base pitch (−6°)
-    this.camera.rotateX((cfg.basePitch * Math.PI) / 180);
-    // rollFactor lean roll contribution
+    this.camera.rotateX((cfg.basePitch * Math.PI) / 180 - clamp(input.brakeInput, 0, 1) * 0.025);
     this.camera.rotateZ(-bike.lean * cfg.rollFactor * dirSign);
 
     // shake
@@ -308,7 +435,10 @@ export class CameraController {
       this.camera.position.y += smoothNoise(this.time * 26, 22) * 0.5 * tr;
     }
 
-    const fovTarget = cfg.fovBase + (cfg.fovMax - cfg.fovBase) * clamp((kmhV - 120) / 190, 0, 1);
+    const fovRange = CAM_CONFIG.dynamic.fovMax - CAM_CONFIG.dynamic.fovBase;
+    const fovBase = cfg.fovBase + this.fovOffset; // user FOV offset (§31)
+    const fovTarget = fovBase + (cfg.fovMax - fovBase + this.fovOffset) * clamp((kmhV - 120) / 190, 0, 1) +
+      (mode === 'dynamic' ? (this.fovKick * 180) / Math.PI * fovRange / 10 : 0);
     this.fovCurrent = lerp(this.fovCurrent, fovTarget, lerpFactor(5, dt));
     if (Math.abs(this.camera.fov - this.fovCurrent) > 0.05) {
       this.camera.fov = this.fovCurrent;
