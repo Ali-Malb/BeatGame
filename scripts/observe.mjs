@@ -40,13 +40,19 @@ function analyze(file) {
   };
 }
 
+const MOBILE = TAG === 'mobile';
 const browser = await puppeteer.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--in-process-gpu', '--use-gl=angle', '--use-angle=swiftshader', '--autoplay-policy=no-user-gesture-required', '--mute-audio', `--window-size=${W},${H}`],
 });
 const page = await browser.newPage();
-// SwiftShader is slow — a small viewport keeps sim-time tracking the audio clock
-await page.setViewport({ width: Math.min(W, 640), height: Math.min(H, 400) });
+if (MOBILE) {
+  // phone portrait: touch emulation triggers the (pointer: coarse) overlay
+  await page.setViewport({ width: W, height: H, isMobile: true, hasTouch: true });
+} else {
+  // SwiftShader is slow — a small viewport keeps sim-time tracking the audio clock
+  await page.setViewport({ width: Math.min(W, 640), height: Math.min(H, 400) });
+}
 const errors = [];
 page.on('pageerror', (e) => errors.push(`[pageerror] ${e.message}`));
 page.on('console', (m) => {
@@ -86,6 +92,30 @@ await page.waitForFunction(
 
 await sleep(6000);
 await page.screenshot({ path: `${OUT}/${TAG}_03_cockpit.png` });
+
+if (MOBILE) {
+  // touch controls present + GAS pad drives the bike
+  const touchInfo = await page.evaluate(() => {
+    const gas = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'GAS');
+    const tuck = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'TUCK');
+    const pause = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === 'Pause');
+    return { gas: !!gas, tuck: !!tuck, pause: !!pause, gasRect: gas ? gas.getBoundingClientRect().toJSON() : null };
+  });
+  console.log(`${TAG} touch controls:`, JSON.stringify(touchInfo));
+  if (touchInfo.gasRect) {
+    const cx = touchInfo.gasRect.x + touchInfo.gasRect.width / 2;
+    const cy = touchInfo.gasRect.y + touchInfo.gasRect.height / 2;
+    const before = await page.evaluate(() => Math.round(window.__game.bike.v * 3.6));
+    await page.touchscreen.touchStart(cx, cy);
+    await sleep(2500);
+    const after = await page.evaluate(() => ({
+      v: Math.round(window.__game.bike.v * 3.6),
+      usingTouch: window.__game.usingTouch,
+    }));
+    await page.touchscreen.touchEnd();
+    console.log(`${TAG} gas pad: ${before} -> ${after.v} km/h, usingTouch=${after.usingTouch}`);
+  }
+}
 
 const stats1 = await page.evaluate(() => {
   const g = window.__game;
