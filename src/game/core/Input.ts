@@ -177,6 +177,7 @@ export class InputHandler {
     let kBrake = this.key('KeyS') || this.key('ArrowDown') ? 1 : 0;
     let kRear = this.key('Space') ? 1 : 0;
     let kSteer = (this.key('KeyD') || this.key('ArrowRight') ? 1 : 0) - (this.key('KeyA') || this.key('ArrowLeft') ? 1 : 0);
+    if (this.invertSteer) kSteer = -kSteer; // §29 invert steering (controls)
     let kTuck = this.key('ShiftLeft') || this.key('ShiftRight');
     let kLookBack = this.key('KeyB');
 
