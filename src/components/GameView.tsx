@@ -16,6 +16,7 @@ import { CAMERA_MODE_NAMES, type CameraMode } from '@/game/camera/CameraControll
 import type { GameSettingsData } from '@/game/core/GameSettings';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
+import { clamp } from '@/game/core/utils';
 import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame, Settings as SettingsIcon } from 'lucide-react';
 
 interface Popup {
@@ -208,6 +209,18 @@ export default function GameView() {
   const menuOpen = state === 'menu' || state === 'search';
   void playingState;
 
+  /** coarse-pointer device (phone/tablet): show on-screen controls (§P2) */
+  const [touchDevice] = useState(() => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches);
+
+  // leaving the ride releases every touch channel so nothing sticks held
+  useEffect(() => {
+    if (riding) return;
+    gameRef.current?.setTouchSteer(null);
+    gameRef.current?.setTouchButton('throttle', false);
+    gameRef.current?.setTouchButton('brake', false);
+    gameRef.current?.setTouchButton('tuck', false);
+  }, [riding]);
+
   /** update one setting and push it into the live engine immediately */
   const setSetting = useCallback(<K extends keyof GameSettingsData>(key: K, value: GameSettingsData[K]) => {
     const game = gameRef.current;
@@ -226,6 +239,20 @@ export default function GameView() {
 
       {/* kinetic lyrics (DSP-driven by the engine) */}
       <div ref={lyricRef} className="klyric-container" aria-hidden="true" />
+
+      {/* on-screen touch controls — coarse pointers only (§P2) */}
+      {riding && touchDevice && <TouchControls game={gameRef.current} />}
+
+      {/* pause button — the only pause affordance on touch (no Escape key) */}
+      {riding && (
+        <button
+          onClick={() => gameRef.current?.togglePause()}
+          className="absolute left-5 top-20 z-20 rounded-full border border-white/15 bg-black/50 p-3 text-white/80 backdrop-blur-sm transition hover:bg-black/70 hover:text-white"
+          aria-label="Pause"
+        >
+          <Pause className="h-4 w-4" />
+        </button>
+      )}
 
       {/* ---------------------------------------------------------- HUD */}
       {riding && (
@@ -663,6 +690,100 @@ export default function GameView() {
       {/* ------------------------------------------------------ SETTINGS */}
       {showSettings && settings && <SettingsPanel settings={settings} onChange={setSetting} onClose={() => setShowSettings(false)} />}
     </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Touch controls — coarse-pointer devices only (§P2). Drag on the    */
+/* lower half to steer (analog), hold pads for throttle/brake/tuck.   */
+/* ------------------------------------------------------------------ */
+
+function TouchControls({ game }: { game: GameManager | null }) {
+  const [steerX, setSteerX] = useState<number | null>(null); // null = pad idle
+
+  const padRef = useRef<HTMLDivElement>(null);
+  const activeId = useRef<number | null>(null);
+
+  // pointer events on the steering pad; touch-action: none in CSS prevents scroll
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (activeId.current !== null) return;
+    activeId.current = e.pointerId;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    handleMove(e);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (activeId.current !== e.pointerId) return;
+    handleMove(e);
+  };
+  const handleMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = padRef.current;
+    if (!el || !game) return;
+    const r = el.getBoundingClientRect();
+    // −1..1 across the pad, dead center slack; finger can travel past edges
+    const v = clamp(((e.clientX - (r.left + r.width / 2)) / (r.width * 0.42)), -1, 1);
+    setSteerX(v);
+    game.setTouchSteer(v);
+  };
+  const release = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (activeId.current !== e.pointerId) return;
+    activeId.current = null;
+    setSteerX(null);
+    game?.setTouchSteer(null);
+  };
+
+  const buttonProps = (which: 'throttle' | 'brake' | 'tuck') => ({
+    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      game?.setTouchButton(which, true);
+    },
+    onPointerUp: () => game?.setTouchButton(which, false),
+    onPointerLeave: () => game?.setTouchButton(which, false),
+    onPointerCancel: () => game?.setTouchButton(which, false),
+  });
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 select-none" style={{ touchAction: 'none' }}>
+      {/* steering pad: full lower-left region */}
+      <div
+        ref={padRef}
+        className="pointer-events-auto absolute bottom-0 left-0 h-[46%] w-[58%]"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={release}
+        onPointerCancel={release}
+      >
+        {steerX !== null && (
+          <div
+            className="absolute bottom-10 h-24 w-24 rounded-full border-2 border-cyan-300/60 bg-cyan-400/10 shadow-[0_0_30px_rgba(80,200,255,0.25)]"
+            style={{ left: `calc(50% + ${steerX * 42}% - 48px)`, animation: 'none' }}
+          />
+        )}
+        {steerX === null && (
+          <div className="absolute bottom-10 left-8 font-ui text-[10px] tracking-[0.3em] text-white/25">◄ DRAG TO STEER ►</div>
+        )}
+      </div>
+      {/* throttle / brake stack — right thumb */}
+      <div className="pointer-events-auto absolute bottom-8 right-6 flex flex-col gap-3">
+        <button
+          {...buttonProps('tuck')}
+          className="h-14 w-14 rounded-full border border-white/20 bg-black/40 font-ui text-[10px] font-bold tracking-widest text-white/70 backdrop-blur-sm active:bg-cyan-400/30"
+        >
+          TUCK
+        </button>
+        <button
+          {...buttonProps('brake')}
+          className="h-20 w-20 rounded-full border-2 border-red-400/40 bg-red-500/20 font-ui text-xs font-bold tracking-widest text-red-100 backdrop-blur-sm active:bg-red-400/50"
+        >
+          BRAKE
+        </button>
+        <button
+          {...buttonProps('throttle')}
+          className="h-24 w-24 rounded-full border-2 border-cyan-300/50 bg-cyan-400/20 font-ui text-sm font-black tracking-widest text-cyan-50 shadow-[0_0_24px_rgba(80,200,255,0.3)] backdrop-blur-sm active:bg-cyan-300/50"
+        >
+          GAS
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -76,7 +76,14 @@ export class GameSettings {
   load(): void {
     try {
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null;
-      if (!raw) return;
+      if (!raw) {
+        // first run on a phone/tablet (no persisted settings yet): start at a
+        // tier the device can actually hold — user can raise it in settings
+        if (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches) {
+          this.current = { ...DEFAULTS, quality: 1, mirrorQuality: 'low', rain: 1, particles: 1 };
+        }
+        return;
+      }
       const parsed = JSON.parse(raw) as Partial<GameSettingsData>;
       // merge defensively (unknown/new keys keep defaults)
       this.current = { ...DEFAULTS, ...parsed };

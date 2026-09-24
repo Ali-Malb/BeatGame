@@ -68,9 +68,9 @@ export const CAM_CONFIG = {
     /** tuck aero slide (dy / dz over ~0.22 s) */
     tuckSlideY: -0.12,
     tuckSlideZ: 0.15,
-    /** static view pitch bias (rad, + = look DOWN; small negative keeps the
-     *  horizon in the 45–55% band) */
-    viewDownBias: -0.05,
+    /** static view pitch bias (rad, + = look DOWN; −0.17 keeps the horizon
+     *  near the upper third so the road fills most of the frame) */
+    viewDownBias: -0.17,
     /** how much road slope attitude transfers into the view pitch */
     slopePitchFactor: 0.85,
     /** throttle lift / brake dive pitch (rad) */

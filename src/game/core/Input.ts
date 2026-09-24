@@ -51,6 +51,27 @@ export class InputHandler {
   private prevGamepadButtons: boolean[] = [];
   private _wasGamepad = false;
 
+  // ---- touch channels (set by the on-screen control overlay; §P2) ----
+  /** -1..1 analog steer command from the touch drag pad */
+  touchSteer: number | null = null;
+  touchThrottle = false;
+  touchBrake = false;
+  touchTuck = false;
+  touchActive = false; // set true on first touch so HUD can show touch hints
+
+  /** called by the touch overlay: steer = -1..1, null releases the pad */
+  setTouchSteer(v: number | null): void {
+    this.touchSteer = v;
+    this.touchActive = true;
+    this.lastDevice = 'keyboard'; // touch rides the keyboard smoothing path
+  }
+  setTouchButton(which: 'throttle' | 'brake' | 'tuck', down: boolean): void {
+    if (which === 'throttle') this.touchThrottle = down;
+    else if (which === 'brake') this.touchBrake = down;
+    else this.touchTuck = down;
+    this.touchActive = true;
+  }
+
   // smoothed analog channels
   throttle = 0;
   brake = 0;
@@ -160,6 +181,12 @@ export class InputHandler {
     let kTuck = this.key('ShiftLeft') || this.key('ShiftRight');
     let kLookBack = this.key('KeyB');
 
+    // ---- touch channels fold in before smoothing (analog drag steer) ----
+    if (this.touchSteer !== null && this.touchSteer !== 0) {
+      kSteer = this.invertSteer ? -this.touchSteer : this.touchSteer;
+    }
+    if (this.touchTuck) kTuck = true;
+
     // ---- gamepad polling ----
     let gp: Gamepad | null = null;
     if (typeof navigator !== 'undefined' && navigator.getGamepads) {
@@ -222,6 +249,10 @@ export class InputHandler {
       this._wasGamepad = true;
     }
 
+    // touch throttle/brake act as full digital commands (smoothing ramps them)
+    if (this.touchThrottle) kThrottle = Math.max(kThrottle, 1);
+    if (this.touchBrake) kBrake = Math.max(kBrake, 1);
+
     // ---- keyboard one-shot events ----
     if (this.once('KeyC')) events.toggleCamera = true;
     if (this.once('Escape') || this.once('KeyP')) events.togglePause = true;
@@ -255,6 +286,11 @@ export class InputHandler {
     void kTuck; // held state folded into tuckActive below
     this.tuckActive = tuckActive;
     return { ...events, tuck: tuckActive, lookBack: this.lookBack } as InputEvents & InputSnapshot;
+  }
+
+  /** true when any touch channel was engaged (for HUD hints) */
+  get usingTouch(): boolean {
+    return this.touchActive;
   }
 
   snapshot(): InputSnapshot {

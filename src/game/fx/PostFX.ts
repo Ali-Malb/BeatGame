@@ -124,9 +124,9 @@ const FinalShader = {
       col = mix(vec3(lum), col, uSaturation);
       col = (col - 0.18) * uContrast + 0.18;
 
-      // vignette
-      float vdist = distance(vUv, vec2(0.5, 0.48));
-      float vig = 1.0 - uVignette * smoothstep(0.36, 0.95, vdist);
+      // vignette — softened: road-critical bottom edge barely dimmed
+      float vdist = distance(vUv, vec2(0.5, 0.44));
+      float vig = 1.0 - uVignette * smoothstep(0.45, 1.05, vdist) * (1.0 - 0.55 * smoothstep(0.5, 0.0, vUv.y));
       col *= vig;
 
       // crash flash

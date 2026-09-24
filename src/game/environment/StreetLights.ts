@@ -61,7 +61,9 @@ export class StreetLights {
       const lat = lamp.side === 1 ? edge - 2.55 : -7.1 + 2.55;
       l.position.set(f.x + f.rx * lat, f.y + 10.1, f.z + f.rz * lat);
       l.visible = true;
-      l.intensity = 30 * scale;
+      // 8 real PointLights over the deck: cadela tuned so pooled light reads
+      // as lamp-lit asphalt from chase distance (§30 streetlight acceptance)
+      l.intensity = 220 * scale;
     }
   }
 

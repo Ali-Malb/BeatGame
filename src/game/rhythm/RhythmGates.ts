@@ -65,8 +65,10 @@ interface Gate {
   bar: THREE.Mesh;
   halo: THREE.Mesh;
   pad: THREE.Mesh;
+  field: THREE.Mesh;
   mats: THREE.MeshBasicMaterial[];
   flash: number;
+  phase: number;
 }
 
 /** per-frame bike state (§4/§9): the render frame is only the OBSERVATION
@@ -194,13 +196,16 @@ export class RhythmGates {
   stats = { perfect: 0, good: 0, miss: 0, lastDelta: 0, recent: [] as number[] };
 
   constructor(scene: THREE.Scene, private highway: Highway) {
-    // ---- shared geometries ----
-    const barGeo = new THREE.BoxGeometry(3.2, 0.2, 0.8);
-    const capGeo = new THREE.BoxGeometry(0.18, 0.28, 0.86);
-    const haloGeo = new THREE.PlaneGeometry(3.4, 1.6);
+    // ---- shared geometries: lane-scale light PORTAL over the crossing plane
+    // (two 5.2 m posts + glowing top beam + translucent energy field) so the
+    // gate reads as architecture from 200 m, not a strip on the road ----
+    const barGeo = new THREE.BoxGeometry(4.1, 0.3, 0.55);
+    const capGeo = new THREE.BoxGeometry(0.28, 0.4, 0.62);
+    const postGeo = new THREE.BoxGeometry(0.17, 5.3, 0.17);
+    const haloGeo = new THREE.PlaneGeometry(4.6, 2.0);
     haloGeo.rotateX(-Math.PI / 2);
+    const fieldGeo = new THREE.PlaneGeometry(3.94, 4.9);
     const postMat = new THREE.MeshStandardMaterial({ color: 0x2e3238, roughness: 0.55, metalness: 0.6 });
-    const postGeo = new THREE.BoxGeometry(0.09, 0.62, 0.09);
     const padGeo = new THREE.PlaneGeometry(3.3, 4.2);
     padGeo.rotateX(-Math.PI / 2);
     const barMat = LANE_COLORS.map(
@@ -208,6 +213,17 @@ export class RhythmGates {
     );
     const capMats = LANE_COLORS.map((c) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(1.9) }));
     const padMats = LANE_COLORS.map((c) => new THREE.MeshStandardMaterial({ color: new THREE.Color(c).multiplyScalar(0.5), roughness: 0.75, metalness: 0.0, transparent: true, opacity: 0.45 }));
+    const fieldMats = LANE_COLORS.map(
+      (c) =>
+        new THREE.MeshBasicMaterial({
+          color: new THREE.Color(c),
+          transparent: true,
+          opacity: 0.0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+    );
     const haloMat = LANE_COLORS.map(
       (c) =>
         new THREE.MeshBasicMaterial({
@@ -223,16 +239,17 @@ export class RhythmGates {
     for (let i = 0; i < POOL_SIZE; i++) {
       const lane = i % 4;
       const group = new THREE.Group();
-      const mats = [barMat[lane], capMats[lane], haloMat[lane]];
+      const mats = [barMat[lane], capMats[lane], haloMat[lane], fieldMats[lane]];
+      // glowing top beam at portal crown
       const bar = new THREE.Mesh(barGeo, mats[0]);
-      bar.position.y = 0.55;
+      bar.position.y = 5.15;
       group.add(bar);
       for (const side of [-1, 1]) {
         const cap = new THREE.Mesh(capGeo, mats[1]);
-        cap.position.set(side * 1.62, 0.58, 0);
+        cap.position.set(side * 2.02, 5.15, 0);
         group.add(cap);
         const post = new THREE.Mesh(postGeo, postMat);
-        post.position.set(side * 1.62, 0.3, 0);
+        post.position.set(side * 1.98, 2.65, 0);
         group.add(post);
       }
       const pad = new THREE.Mesh(padGeo, padMats[lane]);
@@ -241,6 +258,10 @@ export class RhythmGates {
       const halo = new THREE.Mesh(haloGeo, mats[2]);
       halo.position.y = 0.03;
       group.add(halo);
+      // translucent energy field filling the portal
+      const field = new THREE.Mesh(fieldGeo, mats[3]);
+      field.position.y = 2.7;
+      group.add(field);
       group.visible = false;
       scene.add(group);
       this.gates.push({
@@ -252,8 +273,10 @@ export class RhythmGates {
         bar,
         halo,
         pad,
+        field,
         mats,
         flash: 0,
+        phase: i * 1.7,
       });
     }
     this.shatter = new ShatterBurst(scene);
@@ -413,11 +436,16 @@ export class RhythmGates {
       }
 
       // ---- per-gate visuals / recycle ----
+      const now = performance.now() * 0.001;
       for (const g of this.gates) {
         if (!g.active) continue;
+        // idle portal breathing on the energy field
+        if (!g.judged) {
+          (g.field.material as THREE.MeshBasicMaterial).opacity = 0.05 + 0.035 * (0.5 + 0.5 * Math.sin(now * 3.1 + g.phase));
+        }
         if (g.flash > 0) {
           g.flash -= dt;
-          const k = Math.max(0, g.flash / 0.4);
+          const k = Math.max(0, g.flash / 0.5);
           g.mats[0].color.setRGB(
             (g.note.lane === 0 ? 0.21 : g.note.lane === 1 ? 1 : g.note.lane === 2 ? 1 : 0.49) * (1 + 2.4 * k),
             (g.note.lane === 0 ? 0.88 : g.note.lane === 1 ? 0.31 : g.note.lane === 2 ? 0.71 : 1) * (1 + 2.4 * k),
@@ -425,6 +453,7 @@ export class RhythmGates {
           );
           g.bar.scale.y = 1 + 1.6 * k;
           (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34 + 0.5 * k;
+          (g.field.material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.5 * k;
           g.pad.material instanceof THREE.MeshStandardMaterial &&
             ((g.pad.material as THREE.MeshStandardMaterial).opacity = 0.45 + 0.5 * k);
         }
@@ -449,10 +478,13 @@ export class RhythmGates {
       g.mats[0].color.setRGB(0.25, 0.25, 0.28);
       (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.1;
       g.bar.scale.y = 0.35;
+      g.bar.position.y = 1.0; // beam drops — dead portal
+      (g.field.material as THREE.MeshBasicMaterial).opacity = 0.0;
       (g.pad.material as THREE.MeshStandardMaterial).opacity = 0.12;
     } else {
-      g.flash = kind === 'perfect' ? 0.4 : 0.22;
-      this.shatter.burst(g.group.position.x, g.group.position.y + 0.7, g.group.position.z, c, kind === 'perfect' ? 26 : 14, kind === 'perfect' ? 1.2 : 0.8);
+      g.flash = kind === 'perfect' ? 0.5 : 0.3;
+      // shatter the whole portal, not just the ground line
+      this.shatter.burst(g.group.position.x, g.group.position.y + 1.9, g.group.position.z, c, kind === 'perfect' ? 34 : 18, kind === 'perfect' ? 1.35 : 0.9);
     }
   }
 
@@ -463,8 +495,10 @@ export class RhythmGates {
     gate.s = s; // FIXED — never modified after this
     gate.flash = 0;
     gate.bar.scale.y = 1;
+    gate.bar.position.y = 5.15;
     (gate.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34;
     (gate.pad.material as THREE.MeshStandardMaterial).opacity = 0.45;
+    (gate.field.material as THREE.MeshBasicMaterial).opacity = 0.06;
     const c = LANE_COLORS[note.lane];
     gate.mats[0].color.setHex(c).multiplyScalar(1.15);
     gate.mats[1].color.setHex(c).multiplyScalar(1.9);

@@ -298,6 +298,18 @@ export class GameManager {
     this.startAttract();
   }
 
+  // ---------------------------------------------------------------- touch ----
+  /** on-screen touch controls (P2): delegate to the input handler's touch channels */
+  setTouchSteer(v: number | null): void {
+    this.input.setTouchSteer(v);
+  }
+  setTouchButton(which: 'throttle' | 'brake' | 'tuck', down: boolean): void {
+    this.input.setTouchButton(which, down);
+  }
+  get usingTouch(): boolean {
+    return this.input.usingTouch;
+  }
+
   // ------------------------------------------------------------- settings ----
   /** push a full settings object into every live subsystem (§29–§31) */
   applySettings(s: GameSettingsData): void {

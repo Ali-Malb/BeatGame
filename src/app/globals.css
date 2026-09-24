@@ -153,6 +153,15 @@
   animation: popupFloat 0.6s ease-out forwards;
 }
 
+/* ---- touch gameplay (§P2): no scroll/zoom while riding, edge-to-edge ---- */
+@media (pointer: coarse) {
+  html, body {
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
 /* ---------------- kinetic lyrics (§7) — DSP-driven DOM ---------------- */
 .klyric-container {
   position: absolute;
