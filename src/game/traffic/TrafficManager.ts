@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { buildTrafficVehicle, buildOncomingCar, VehicleKind, VehicleModel } from './trafficModels';
 import { Highway } from '../environment/Highway';
 import { lerp, smoothstep, RNG, ms } from '../core/utils';
+import { districtKindAt } from '../environment/districts';
 import type { BikeController } from '../vehicle/BikeController';
 
 export interface NearMissEvent {
@@ -47,6 +48,8 @@ interface TrafficCar {
   passed: boolean;
   speedClass: number;
   spawnOrder: number;
+  /** transient speed factor from a braking wave (1 = normal) */
+  waveSlow: number;
 }
 
 const SPEED_CLASSES = [
@@ -65,7 +68,7 @@ const CORRIDOR = 40; // m — remaining lane must stay clear
 
 export class TrafficManager {
   private pool: TrafficCar[] = [];
-  private oncoming: { group: THREE.Group; s: number; v: number; active: boolean }[] = [];
+  private oncoming: { group: THREE.Group; s: number; v: number; active: boolean; off: number }[] = [];
   private rng = new RNG(777);
   private time = 0;
   private spawnCounter = 0;
@@ -77,6 +80,14 @@ export class TrafficManager {
   repairPushes = 0;
   /** scratch occupancy (no per-frame allocation) */
   private occ = [false, false, false, false];
+  /** density varies with district + a slow traffic rhythm (platoons / lulls) */
+  private targetActive = ACTIVE_TARGET;
+  private densityTimer = 0;
+  private heavyBias = 0.22;
+  /** braking wave: a slow-down ripple travelling back through the pack */
+  private waveTimer = 6;
+  private waveS = 0;
+  private waveArmed = false;
   /** active list (rebuilt per frame without allocation) */
   private activeScratch: TrafficCar[] = [];
   private activeCount_ = 0;
@@ -135,13 +146,14 @@ export class TrafficManager {
         passed: false,
         speedClass: 1,
         spawnOrder: 0,
+        waveSlow: 1,
       });
     }
     for (let i = 0; i < 7; i++) {
       const g = buildOncomingCar();
       g.visible = false;
       scene.add(g);
-      this.oncoming.push({ group: g, s: 0, v: 0, active: false });
+      this.oncoming.push({ group: g, s: 0, v: 0, active: false, off: 11 });
     }
     // preallocated spray point pool
     for (let i = 0; i < POOL_TOTAL; i++) this.sprayVecs.push(new THREE.Vector3());
@@ -215,17 +227,32 @@ export class TrafficManager {
 
   // ------------------------------------------------------------------ spawn ----
   private trySpawn(playerS: number): boolean {
-    // find a free car without filter()
+    // pick a free car, biased toward the district's expected mix (industrial
+    // belts and the port run heavier than the urban core)
+    const wantHeavy = this.rng.next() < this.heavyBias;
     let car: TrafficCar | null = null;
-    for (const c of this.pool) {
-      if (!c.active) {
-        car = c;
-        break;
+    if (wantHeavy) {
+      for (const c of this.pool) {
+        if (!c.active && c.model.heavy) {
+          car = c;
+          break;
+        }
+      }
+    }
+    if (!car) {
+      for (const c of this.pool) {
+        if (!c.active) {
+          car = c;
+          break;
+        }
       }
     }
     if (!car) return false;
 
-    const s = playerS + this.rng.range(250, 380);
+    // platoons: ~30% of spawns join a loose cluster so the road shows groups
+    // and gaps rather than a uniform ribbon of cars
+    const cluster = this.rng.next() < 0.3;
+    const s = playerS + (cluster ? this.rng.range(235, 305) : this.rng.range(250, 430));
     const kind = car.model.kind;
     let speedClass = 1;
     if (kind === 'boxTruck' || kind === 'flatbed' || kind === 'bus' || kind === 'van') speedClass = 0;
@@ -281,6 +308,7 @@ export class TrafficManager {
       car.braking = false;
       car.cooldown = this.rng.range(4, 14);
       car.speedClass = speedClass;
+      car.waveSlow = 1;
       car.rel = s - playerS;
       car.passed = false;
       car.spawnOrder = ++this.spawnCounter;
@@ -295,9 +323,29 @@ export class TrafficManager {
     this.time += dt;
     this.lastPlayerV = playerV;
 
-    // ---- maintain population (15–25) ----
+    // ---- density: district-driven level + a slow congestion rhythm ----
+    this.densityTimer -= dt;
+    if (this.densityTimer <= 0) {
+      this.densityTimer = 1.5;
+      const kind = districtKindAt(playerS);
+      this.heavyBias =
+        kind === 'industrial' || kind === 'port' ? 0.4 : kind === 'park' ? 0.3 : kind === 'suburb' ? 0.26 : 0.2;
+      const base = kind === 'urban' ? 22 : kind === 'industrial' || kind === 'port' ? 20 : kind === 'park' ? 13 : 16;
+      this.targetActive = Math.max(9, base + Math.round(Math.sin(this.time * 0.045) * 3));
+    }
+
+    // ---- braking wave: a ripple of brake lights travels back through traffic
+    this.waveTimer -= dt;
+    if (!this.waveArmed && this.waveTimer <= 0) {
+      this.waveTimer = this.rng.range(7, 18);
+      this.waveArmed = true;
+      this.waveS = playerS + this.rng.range(110, 280);
+    }
+    if (this.waveArmed && playerS > this.waveS + 40) this.waveArmed = false;
+
+    // ---- maintain population (district-scaled 13–22) ----
     let guard = 0;
-    while (this.activeCount_ < ACTIVE_TARGET && guard++ < 6) {
+    while (this.activeCount_ < this.targetActive && guard++ < 6) {
       if (!this.trySpawn(playerS)) break;
     }
 
@@ -341,19 +389,27 @@ export class TrafficManager {
           lead = other;
         }
       }
+      // braking-wave slowdown decays back to the car's own target over ~5 s
+      if (car.waveSlow < 1) car.waveSlow = Math.min(1, car.waveSlow + dt * 0.16);
+      if (this.waveArmed && car.waveSlow >= 1 && car.s > this.waveS && car.s < this.waveS + 70) {
+        car.waveSlow = this.rng.range(0.5, 0.72);
+      }
+      const desiredTarget = car.targetV * car.waveSlow;
       const safeGap = car.v * 0.9 + 10;
       if (lead && leadGap < safeGap) {
-        const desired = Math.min(car.targetV, lead.v * 0.97);
+        const desired = Math.min(desiredTarget, lead.v * 0.97);
         if (desired < car.v - 0.4) {
           car.v = Math.max(desired, car.v - 6.5 * dt);
           car.braking = car.v - desired > 0.5 || leadGap < safeGap * 0.6;
         } else {
           car.braking = false;
-          car.v = Math.min(car.targetV, car.v + 2.2 * dt);
+          car.v = Math.min(desiredTarget, car.v + 2.2 * dt);
         }
       } else {
-        car.braking = false;
-        car.v = Math.min(car.targetV, car.v + 2.0 * dt);
+        // free road: accelerate back to target unless a wave is slowing us
+        car.v = Math.min(desiredTarget, car.v + 2.0 * dt);
+        car.braking = car.waveSlow < 0.97 && car.v > desiredTarget + 0.5;
+        if (!car.braking && car.v > desiredTarget + 0.5) car.v = Math.max(desiredTarget, car.v - 4.5 * dt);
       }
 
       // -------- lane change decisions (signal 1.2 s, then 2.5 s maneuver) ----
@@ -469,10 +525,11 @@ export class TrafficManager {
     // ---- oncoming ghosts ----
     for (const oc of this.oncoming) {
       if (!oc.active) {
-        if (this.rng.next() < 0.012) {
+        if (this.rng.next() < 0.02) {
           oc.active = true;
-          oc.s = playerS + 240 + this.rng.range(0, 120);
-          oc.v = ms(this.rng.range(70, 95));
+          oc.s = playerS + 200 + this.rng.range(0, 260);
+          oc.v = ms(this.rng.range(62, 104));
+          oc.off = this.rng.range(9.4, 13.2);
           oc.group.visible = true;
         }
         continue;
@@ -484,7 +541,7 @@ export class TrafficManager {
         continue;
       }
       const p = this.highway.frame(oc.s);
-      oc.group.position.set(p.x - p.rx * 11.0, p.y, p.z - p.rz * 11.0);
+      oc.group.position.set(p.x - p.rx * oc.off, p.y, p.z - p.rz * oc.off);
       oc.group.rotation.y = p.yaw + Math.PI;
     }
   }
@@ -626,8 +683,9 @@ export class TrafficManager {
       oc.active = false;
       oc.group.visible = false;
     }
+    this.targetActive = ACTIVE_TARGET;
     let guard = 0;
-    while (this.activeCount_ < ACTIVE_TARGET && guard++ < 10) {
+    while (this.activeCount_ < this.targetActive && guard++ < 10) {
       if (!this.trySpawn(playerS)) break;
     }
   }
