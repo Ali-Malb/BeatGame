@@ -53,6 +53,15 @@ import {
 } from '../audio/SongResolver';
 import { KineticLyricManager, type LyricCue } from '../rhythm/KineticLyricManager';
 import { GameSettings, type GameSettingsData } from './GameSettings';
+import { districtKindAt, DISTRICT_NAMES } from '../environment/districts';
+import type { InputState } from '../runtime/InputState';
+import type {
+  JudgmentEvent,
+  SimSnapshot,
+  SnapshotCar,
+  SnapshotGate,
+  SnapshotScoring,
+} from '../runtime/types';
 
 export type GameState =
   | 'boot'
@@ -305,6 +314,128 @@ export class GameManager {
   }
   setTouchButton(which: 'throttle' | 'brake' | 'tuck', down: boolean): void {
     this.input.setTouchButton(which, down);
+  }
+
+  // ------------------------------------------------------- runtime adapter ----
+  /**
+   * Inject normalized external input (remote session transport or a scripted
+   * driver). It enters the SAME channels the local devices use, so smoothing,
+   * sensitivity and deadzone behave identically. `null` hands control back.
+   */
+  setExternalInput(state: InputState | null): void {
+    this.input.setRemote(state);
+  }
+
+  private runtimeTickCount = 0;
+  private runtimeCars: SnapshotCar[] = [];
+  private runtimeJudgment: JudgmentEvent | null = null;
+
+  /**
+   * Everything a runtime adapter (LocalRuntime) needs for a SimSnapshot, taken
+   * straight from the live systems — no duplicated bookkeeping.
+   */
+  runtimeState(): {
+    tick: number;
+    fps: number;
+    bike: {
+      s: number;
+      x: number;
+      v: number;
+      rpm: number;
+      gear: number;
+      lean: number;
+      wheelie: number;
+      tuck: number;
+      crashed: boolean;
+      lane: number;
+    };
+    traffic: SnapshotCar[];
+    gates: SnapshotGate[];
+    judgment: JudgmentEvent | null;
+    scoring: SnapshotScoring;
+    biome: number;
+    biomeName: string;
+    weather: number;
+    district: string;
+    districtName: string;
+    section: string;
+    cameraMode: string;
+    fov: number;
+    songTime: number;
+    songDuration: number;
+    bpm: number;
+    song: { source: 'youtube' | 'upload' | 'demo'; title: string };
+  } {
+    const m = this.bike.model;
+    this.traffic.snapshotCars(this.runtimeCars);
+    const s = this.scoring;
+    const district = districtKindAt(this.bike.s);
+    return {
+      tick: this.runtimeTickCount,
+      fps: this.fps,
+      bike: {
+        s: this.bike.s,
+        x: this.bike.x,
+        v: this.bike.v,
+        rpm: this.bike.rpm,
+        gear: this.bike.gear,
+        lean: m.rollAngle,
+        wheelie: m.wheelie,
+        tuck: m.tuck,
+        crashed: this.bike.crashed,
+        lane: this.laneIndexFor(this.bike.x, this.bike.s),
+      },
+      traffic: this.runtimeCars.slice(),
+      gates: this.gates.snapshotGates(),
+      judgment: this.runtimeJudgment,
+      scoring: {
+        score: Math.floor(s.score),
+        combo: s.combo,
+        multiplier: multiplierForCombo(s.combo),
+        hp: Math.max(0, s.hp),
+        perfects: s.perfects,
+        goods: s.goods,
+        misses: s.misses,
+        crashes: s.crashes,
+        bestCombo: s.bestCombo,
+        dead: s.dead,
+      },
+      biome: Math.max(0, this.appliedBiome),
+      biomeName: BIOME_NAMES[Math.max(0, this.appliedBiome)],
+      weather: Math.max(0, this.appliedPreset),
+      district,
+      districtName: DISTRICT_NAMES[district],
+      section:
+        this.selection.source === 'demo'
+          ? (this.rhythm?.getSectionName() ?? '—')
+          : this.analysis
+            ? sectionAt(this.analysis, Math.max(0, this.dspClock.getAudioTime())).kind
+            : '—',
+      cameraMode: this.cam.mode,
+      fov: this.cam.camera.fov,
+      songTime: this.dspClock.getAudioTime(),
+      songDuration: this.analysis?.duration ?? LOOP_SEC,
+      bpm: this.analysis?.bpm ?? 128,
+      song: { source: this.selection.source, title: this.selection.title },
+    };
+  }
+
+  private laneIndexFor(x: number, s: number): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let l = 0; l < 4; l++) {
+      const d = Math.abs(this.highway.spline.laneX(s, l) - x);
+      if (d < bestD) {
+        bestD = d;
+        best = l;
+      }
+    }
+    return best;
+  }
+
+  /** frames rendered since boot (runtime tick counter) */
+  get frameCount(): number {
+    return this.renderer.info.render.frame;
   }
   get usingTouch(): boolean {
     return this.input.usingTouch;
@@ -896,6 +1027,12 @@ export class GameManager {
 
   private handleGateEvents(events: GateEvent[]): void {
     for (const ev of events) {
+      this.runtimeJudgment = {
+        judgment: ev.judgment,
+        delta: ev.delta,
+        lane: ev.note.lane,
+        at: Date.now(),
+      };
       if (ev.judgment === 'perfect') {
         this.scoring.addJudgment('perfect');
         this.audio.gatePing(true);
@@ -1244,6 +1381,8 @@ export class GameManager {
       rain: post.rain,
       vignette: post.vignette,
     });
+
+    this.runtimeTickCount++;
 
     // demo synth beat scheduling (demo mode only)
     if (this.selection.source === 'demo' && this.demoMusicOn && this.state === 'playing') this.music.pump();

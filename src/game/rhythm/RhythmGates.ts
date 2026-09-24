@@ -69,6 +69,8 @@ interface Gate {
   mats: THREE.MeshBasicMaterial[];
   flash: number;
   phase: number;
+  /** judgment recorded when this gate was crossed (remote snapshot/telemetry) */
+  judgment: GateJudgment | null;
 }
 
 /** per-frame bike state (§4/§9): the render frame is only the OBSERVATION
@@ -277,6 +279,7 @@ export class RhythmGates {
         mats,
         flash: 0,
         phase: i * 1.7,
+        judgment: null,
       });
     }
     this.shatter = new ShatterBurst(scene);
@@ -472,6 +475,7 @@ export class RhythmGates {
   }
 
   private judged(g: Gate, kind: GateJudgment): void {
+    g.judgment = kind;
     const c = this.tmpColor.setHex(LANE_COLORS[g.note.lane]);
     if (kind === 'miss') {
       g.flash = 0.0;
@@ -516,6 +520,29 @@ export class RhythmGates {
   private findFree(): Gate | null {
     for (const g of this.gates) if (!g.active) return g;
     return null;
+  }
+
+  /**
+   * Snapshot of the gates currently in the world (remote runtime). Includes
+   * the recorded judgment so a remote client can render live gate state from
+   * the authoritative server instead of guessing.
+   */
+  snapshotGates(): { id: number; s: number; lane: number; color: string; judged: boolean; judgment: 'perfect' | 'good' | 'miss' | null }[] {
+    const out: { id: number; s: number; lane: number; color: string; judged: boolean; judgment: 'perfect' | 'good' | 'miss' | null }[] = [];
+    for (let i = 0; i < this.gates.length; i++) {
+      const g = this.gates[i];
+      if (!g.active) continue;
+      const hex = LANE_COLORS[g.note.lane] ?? LANE_COLORS[0];
+      out.push({
+        id: i,
+        s: +g.s.toFixed(2),
+        lane: g.note.lane,
+        color: `#${hex.toString(16).padStart(6, '0')}`,
+        judged: g.judged,
+        judgment: g.judgment,
+      });
+    }
+    return out;
   }
 
   /** deterministic track position of the next un-judged note (debug HUD) */

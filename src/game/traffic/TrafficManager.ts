@@ -570,6 +570,46 @@ export class TrafficManager {
     return -1;
   }
 
+  /**
+   * Snapshot of the active cars (remote runtime: the server ships this to the
+   * client, and the client's software/WebRTC view consumes it). Reuses the
+   * provided array so the server loop allocates nothing per frame.
+   */
+  snapshotCars(out: {
+    s: number;
+    x: number;
+    v: number;
+    lane: number;
+    kind: string;
+    halfL: number;
+    halfW: number;
+    heavy: boolean;
+    braking: boolean;
+    blinker: number;
+  }[]): void {
+    let n = 0;
+    for (const car of this.pool) {
+      if (!car.active) continue;
+      let slot = out[n];
+      if (!slot) {
+        slot = { s: 0, x: 0, v: 0, lane: 0, kind: '', halfL: 0, halfW: 0, heavy: false, braking: false, blinker: 0 };
+        out[n] = slot;
+      }
+      slot.s = car.s;
+      slot.x = car.x;
+      slot.v = car.v;
+      slot.lane = car.lane;
+      slot.kind = car.model.kind;
+      slot.halfL = car.model.halfL;
+      slot.halfW = car.model.halfW;
+      slot.heavy = car.model.heavy;
+      slot.braking = car.braking;
+      slot.blinker = car.blinker;
+      n++;
+    }
+    out.length = n;
+  }
+
   /** iterate active cars with front/rear world anchors (consumed by TrafficLights) */
   forEachActive(cb: (front: THREE.Vector3, back: THREE.Vector3, braking: boolean) => void): void {
     for (const car of this.pool) {
