@@ -53,6 +53,10 @@ export interface RemoteStartOptions extends StartOptions {
 const INPUT_HZ = 30;
 const HEARTBEAT_MS = 2000;
 
+/** reconnect with capped exponential backoff — never gives up while the UI lives */
+const BACKOFF_BASE_MS = 800;
+const BACKOFF_MAX_MS = 8000;
+
 export class RemoteRuntime implements GameRuntime {
   readonly kind: RuntimeKind = 'remote';
   private baseUrl: string;
@@ -80,6 +84,7 @@ export class RemoteRuntime implements GameRuntime {
   private dataChannel: RTCDataChannel | null = null;
   private snapshotWatchdog: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(baseUrl = '') {
     this.baseUrl = baseUrl;
@@ -215,9 +220,13 @@ export class RemoteRuntime implements GameRuntime {
     }
   }
 
-  /** reconnect awareness: a dropped snapshot stream restarts automatically */
+  /** reconnect awareness: a dropped snapshot stream restarts with backoff */
   private openStream(): void {
-    if (!this.sessionId) return;
+    if (!this.sessionId || this.disposed) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.eventSource?.close();
     const es = new EventSource(`${this.baseUrl}/api/remote/session/${this.sessionId}/stream`);
     this.eventSource = es;
@@ -234,6 +243,11 @@ export class RemoteRuntime implements GameRuntime {
     es.addEventListener('hello', (ev) => this.onSnapshotEvent((ev as MessageEvent).data));
     es.addEventListener('snapshot', (ev) => {
       this.reconnectAttempts = 0;
+      if (this.snapshotWatchdog) {
+        clearTimeout(this.snapshotWatchdog);
+        this.snapshotWatchdog = null;
+      }
+      // re-arm AFTER each frame instead of stacking a fresh 5 s timer per event
       armWatchdog();
       this.onSnapshotEvent((ev as MessageEvent).data);
     });
@@ -243,8 +257,16 @@ export class RemoteRuntime implements GameRuntime {
     });
     es.onerror = () => {
       if (this.disposed) return;
-      this.connected = this.eventSource?.readyState === EventSource.OPEN;
+      es.close();
+      this.connected = false;
       this.emitStatus();
+      // EventSource auto-retries immediately on same-page errors; gate it through
+      // our own backoff so a dead session doesn't hammer the server
+      const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(this.reconnectAttempts, 4));
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.disposed && this.sessionId) this.openStream();
+      }, delay);
     };
   }
 
@@ -381,6 +403,7 @@ export class RemoteRuntime implements GameRuntime {
     this.eventSource?.close();
     this.eventSource = null;
     if (this.snapshotWatchdog) clearTimeout(this.snapshotWatchdog);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.inputTimer) clearInterval(this.inputTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.dataChannel?.close();

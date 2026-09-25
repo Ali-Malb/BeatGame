@@ -967,6 +967,25 @@ export class GameManager {
     this.rafId = requestAnimationFrame(this.loop);
   }
 
+  /**
+   * Remote play: hand the whole client over to the streamed session. The local
+   * GameManager keeps ZERO GPU/CPU load while a remote video is showing — the
+   * expensive 3D world must not keep rendering underneath it (its render cost
+   * is exactly what remote mode exists to offload). The run state is untouched;
+   * the loop simply stops until resumeAttract().
+   */
+  suspendAttract(): void {
+    if (!this.running) return;
+    this.running = false;
+    cancelAnimationFrame(this.rafId);
+  }
+
+  /** counterpart to suspendAttract — restart the attract loop from now */
+  resumeAttract(): void {
+    if (this.running || this.state !== 'menu') return;
+    this.startAttract();
+  }
+
   togglePause(): void {
     if (this.state === 'playing') {
       this.setState('paused');
