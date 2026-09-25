@@ -27,6 +27,8 @@ export interface VehicleModel {
   headPoolMat: THREE.MeshBasicMaterial;
   /** additive red pavement glow behind the car while braking */
   brakePoolMat: THREE.MeshBasicMaterial;
+  /** low-quality render switch; simulation state is unaffected */
+  setDetailTier: (tier: 0 | 1 | 2) => void;
   /** emergency light bar materials (ambulance) */
   emergA?: THREE.MeshBasicMaterial;
   emergB?: THREE.MeshBasicMaterial;
@@ -287,6 +289,7 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
   // ---- emergency bar (ambulance) ----
   let emergA: THREE.MeshBasicMaterial | undefined;
   let emergB: THREE.MeshBasicMaterial | undefined;
+  const emergencyMeshes: THREE.Mesh[] = [];
   if (kind === 'ambulance') {
     emergA = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 0.05, 0.05) });
     emergB = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.05, 0.05, 2.2) });
@@ -295,7 +298,20 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
     const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.14, 0.3), emergB);
     b.position.set(0.35, height + 0.08, -0.2);
     group.add(a, b);
+    emergencyMeshes.push(a, b);
   }
+
+  const setDetailTier = (tier: 0 | 1 | 2): void => {
+    // Keep the body as the reliable gameplay silhouette in the low tier;
+    // accessory passes are decorative and otherwise dominate draw calls.
+    lightsMesh.visible = tier >= 1;
+    tailMesh.visible = tier >= 1;
+    blinker.visible = tier >= 2;
+    glowMesh.visible = tier >= 2;
+    headPool.visible = tier >= 1;
+    brakePool.visible = tier >= 1;
+    for (const mesh of emergencyMeshes) mesh.visible = tier >= 1;
+  };
 
   return {
     group,
@@ -310,6 +326,7 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
     kind,
     headPoolMat,
     brakePoolMat,
+    setDetailTier,
     emergA,
     emergB,
   };

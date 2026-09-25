@@ -53,6 +53,15 @@ import {
 } from '../audio/SongResolver';
 import { KineticLyricManager, type LyricCue } from '../rhythm/KineticLyricManager';
 import { GameSettings, type GameSettingsData } from './GameSettings';
+import { districtKindAt, DISTRICT_NAMES } from '../environment/districts';
+import type { InputState } from '../runtime/InputState';
+import type {
+  JudgmentEvent,
+  SimSnapshot,
+  SnapshotCar,
+  SnapshotGate,
+  SnapshotScoring,
+} from '../runtime/types';
 
 export type GameState =
   | 'boot'
@@ -229,6 +238,9 @@ export class GameManager {
 
   private qualityTier = 2;
   private lowFpsTimer = 0;
+  /** SwiftShader/llvmpipe cannot sustain the full scene; start it on the
+   * lightweight path instead of waiting for the adaptive downgrade timer. */
+  private softwareRenderer = false;
 
   private tmpVel = new THREE.Vector3();
   private tmpFwd = new THREE.Vector3(0, 0, 1);
@@ -249,6 +261,10 @@ export class GameManager {
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const gl = this.renderer.getContext();
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL: number } | null;
+    const rendererName = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : '';
+    this.softwareRenderer = /swiftshader|llvmpipe|software/i.test(rendererName);
 
     this.highway = new Highway(this.scene);
     this.weather = new WeatherController(this.renderer, this.scene, this.highway.mats);
@@ -306,6 +322,182 @@ export class GameManager {
   setTouchButton(which: 'throttle' | 'brake' | 'tuck', down: boolean): void {
     this.input.setTouchButton(which, down);
   }
+
+  // ------------------------------------------------------- runtime adapter ----
+  /**
+   * Inject normalized external input (remote session transport or a scripted
+   * driver). It enters the SAME channels the local devices use, so smoothing,
+   * sensitivity and deadzone behave identically. `null` hands control back.
+   */
+  setExternalInput(state: InputState | null): void {
+    this.input.setRemote(state);
+  }
+
+  private runtimeTickCount = 0;
+  private runtimeCars: SnapshotCar[] = [];
+  private runtimeJudgment: JudgmentEvent | null = null;
+
+  /**
+   * Everything a runtime adapter (LocalRuntime) needs for a SimSnapshot, taken
+   * straight from the live systems — no duplicated bookkeeping.
+   */
+  runtimeState(): {
+    tick: number;
+    fps: number;
+    bike: {
+      s: number;
+      x: number;
+      v: number;
+      rpm: number;
+      gear: number;
+      lean: number;
+      wheelie: number;
+      tuck: number;
+      crashed: boolean;
+      lane: number;
+    };
+    traffic: SnapshotCar[];
+    gates: SnapshotGate[];
+    judgment: JudgmentEvent | null;
+    scoring: SnapshotScoring;
+    biome: number;
+    biomeName: string;
+    weather: number;
+    district: string;
+    districtName: string;
+    section: string;
+    cameraMode: string;
+    fov: number;
+    songTime: number;
+    songDuration: number;
+    bpm: number;
+    song: { source: 'youtube' | 'upload' | 'demo'; title: string };
+  } {
+    const m = this.bike.model;
+    this.traffic.snapshotCars(this.runtimeCars);
+    const s = this.scoring;
+    const district = districtKindAt(this.bike.s);
+    return {
+      tick: this.runtimeTickCount,
+      fps: this.fps,
+      bike: {
+        s: this.bike.s,
+        x: this.bike.x,
+        v: this.bike.v,
+        rpm: this.bike.rpm,
+        gear: this.bike.gear,
+        lean: m.rollAngle,
+        wheelie: m.wheelie,
+        tuck: m.tuck,
+        crashed: this.bike.crashed,
+        lane: this.laneIndexFor(this.bike.x, this.bike.s),
+      },
+      traffic: this.runtimeCars.slice(),
+      gates: this.gates.snapshotGates(),
+      judgment: this.runtimeJudgment,
+      scoring: {
+        score: Math.floor(s.score),
+        combo: s.combo,
+        multiplier: multiplierForCombo(s.combo),
+        hp: Math.max(0, s.hp),
+        perfects: s.perfects,
+        goods: s.goods,
+        misses: s.misses,
+        crashes: s.crashes,
+        bestCombo: s.bestCombo,
+        dead: s.dead,
+      },
+      biome: Math.max(0, this.appliedBiome),
+      biomeName: BIOME_NAMES[Math.max(0, this.appliedBiome)],
+      weather: Math.max(0, this.appliedPreset),
+      district,
+      districtName: DISTRICT_NAMES[district],
+      section:
+        this.selection.source === 'demo'
+          ? (this.rhythm?.getSectionName() ?? '—')
+          : this.analysis
+            ? sectionAt(this.analysis, Math.max(0, this.dspClock.getAudioTime())).kind
+            : '—',
+      cameraMode: this.cam.mode,
+      fov: this.cam.camera.fov,
+      songTime: this.dspClock.getAudioTime(),
+      songDuration: this.analysis?.duration ?? LOOP_SEC,
+      bpm: this.analysis?.bpm ?? 128,
+      song: { source: this.selection.source, title: this.selection.title },
+    };
+  }
+
+  private laneIndexFor(x: number, s: number): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let l = 0; l < 4; l++) {
+      const d = Math.abs(this.highway.spline.laneX(s, l) - x);
+      if (d < bestD) {
+        bestD = d;
+        best = l;
+      }
+    }
+    return best;
+  }
+
+  /** frames rendered since boot (runtime tick counter) */
+  get frameCount(): number {
+    return this.renderer.info.render.frame;
+  }
+
+  // ------------------------------------------------------- remote beatmap ----
+  /**
+   * The current rhythm chart as a transferable beatmap (remote runtime).
+   *
+   * The DSP analysis stays client-side and deterministic; the SERVER then owns
+   * the clock, the gate spacing (trackPositionFor) and every judgment — the
+   * beatmap is data, timing authority is not.
+   */
+  exportBeatmap(): {
+    notes: { time: number; lane: number; type: string; strength: number; subdivision: number }[];
+    bpm: number;
+    duration: number;
+    firstBeat: number;
+    beatSec: number;
+    sections: { start: number; end: number; kind: string; energy: number }[];
+  } | null {
+    const chart = this.chart;
+    if (!chart) return null;
+    return {
+      notes: chart.notes.map((n) => ({
+        time: n.time,
+        lane: n.lane,
+        type: n.type,
+        strength: n.strength,
+        subdivision: n.subdivision,
+      })),
+      bpm: chart.bpm,
+      duration: chart.duration,
+      firstBeat: chart.firstBeat,
+      beatSec: chart.beatSec,
+      sections: chart.sections.map((s) => ({ start: s.start, end: s.end, kind: s.kind, energy: s.energy })),
+    };
+  }
+
+  /** beatmap for the built-in demo track without starting a local run */
+  demoBeatmap(): ReturnType<GameManager['exportBeatmap']> {
+    const analysis = this.demoAnalysis();
+    const chart = buildChart(analysis);
+    return {
+      notes: chart.notes.map((n) => ({
+        time: n.time,
+        lane: n.lane,
+        type: n.type,
+        strength: n.strength,
+        subdivision: n.subdivision,
+      })),
+      bpm: chart.bpm,
+      duration: chart.duration,
+      firstBeat: chart.firstBeat,
+      beatSec: chart.beatSec,
+      sections: chart.sections.map((s) => ({ start: s.start, end: s.end, kind: s.kind, energy: s.energy })),
+    };
+  }
   get usingTouch(): boolean {
     return this.input.usingTouch;
   }
@@ -332,39 +524,57 @@ export class GameManager {
     // graphics
     this.postfx.bloomEnabled = s.bloom;
     this.postfx.motionBlurEnabled = s.motionBlur;
-    this.weather.envEnabled = s.reflections;
-    this.cam.mirrorEvery = s.mirrorQuality === 'off' ? 9999 : s.mirrorQuality === 'low' ? 4 : s.mirrorQuality === 'medium' ? 2 : 1;
-    this.cam.setMirrorRes(s.mirrorQuality === 'high' ? 384 : 256);
     this.cam.fovOffset = s.fovOffset;
-    this.applyQualityTier(s.quality);
+    const quality = this.softwareRenderer ? 0 : s.quality;
+    // Keep the in-memory settings view honest when the platform force-selects
+    // the software-safe tier; this does not overwrite the user's persisted
+    // preference.
+    if (this.softwareRenderer) this.settings.current.quality = 0;
+    this.applyQualityTier(quality);
     this.showFps = s.showFps;
   }
 
   /** graphics quality tier → concrete renderer budget (0 low … 2 high) */
   private applyQualityTier(tier: 0 | 1 | 2): void {
+    this.qualityTier = tier;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    if (tier === 0) {
-      this.renderer.setPixelRatio(Math.min(0.75, window.devicePixelRatio));
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = false;
-      this.weather.setShadowsEnabled(false);
-      this.weather.envEnabled = false;
-      this.postfx.rebuild(this.renderer, w, h, 0);
-      this.cam.mirrorEvery = 9999;
-    } else if (tier === 1) {
-      this.renderer.setPixelRatio(1);
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = true;
-      this.weather.setShadowsEnabled(true);
-      this.postfx.rebuild(this.renderer, w, h, 1);
-    } else {
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = true;
-      this.weather.setShadowsEnabled(true);
-      this.postfx.rebuild(this.renderer, w, h, 2);
+    const low = tier === 0;
+    const pixelRatio = low
+      ? (this.softwareRenderer ? 0.42 : 0.5)
+      : tier === 1
+        ? 1
+        : Math.min(window.devicePixelRatio || 1, 1.6);
+    this.renderer.setPixelRatio(pixelRatio);
+    this.renderer.setSize(w, h, false);
+    this.renderer.shadowMap.enabled = tier === 2;
+    this.weather.setQualityTier(tier);
+    this.weather.setShadowsEnabled(tier === 2);
+    this.weather.setEnvironmentEnabled(tier === 2 && this.settings.current.reflections);
+
+    this.postfx.setQualityTier(tier);
+    if (low) {
+      // These are hard low-tier overrides; the user's toggles are restored
+      // when a higher tier is selected again.
+      this.postfx.bloomEnabled = false;
+      this.postfx.motionBlurEnabled = false;
     }
+
+    const mirrorSetting = this.settings.current.mirrorQuality;
+    const mirrorEnabled = tier > 0 && mirrorSetting !== 'off';
+    const configuredCadence = mirrorSetting === 'low' ? 4 : mirrorSetting === 'medium' ? 2 : 1;
+    this.cam.setMirrorsEnabled(mirrorEnabled);
+    this.cam.mirrorEvery = mirrorEnabled ? (tier === 1 ? Math.max(4, configuredCadence) : configuredCadence) : 9999;
+    this.cam.setMirrorRes(tier === 0 ? 128 : mirrorSetting === 'high' ? 384 : tier === 1 ? 128 : 256);
+
+    this.highway.setQualityTier(tier);
+    this.biomes.setQualityTier(tier);
+    this.bike.setQualityTier(tier);
+    this.gates.setQualityTier(tier);
+    this.traffic.setQualityTier(tier);
+    this.trafficLights.setEnabled(tier > 0);
+    this.streetLights.setEnabled(tier > 0);
+    this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0);
   }
 
   /** route volume changes into the live audio graph (real gains, §30) */
@@ -896,6 +1106,12 @@ export class GameManager {
 
   private handleGateEvents(events: GateEvent[]): void {
     for (const ev of events) {
+      this.runtimeJudgment = {
+        judgment: ev.judgment,
+        delta: ev.delta,
+        lane: ev.note.lane,
+        at: Date.now(),
+      };
       if (ev.judgment === 'perfect') {
         this.scoring.addJudgment('perfect');
         this.audio.gatePing(true);
@@ -1005,23 +1221,9 @@ export class GameManager {
       this.lowFpsTimer += realDt;
       if (this.lowFpsTimer > 2.0) {
         this.lowFpsTimer = 0;
-        this.qualityTier--;
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        if (this.qualityTier === 1) {
-          this.renderer.setPixelRatio(1);
-          this.renderer.setSize(w, h, false);
-          this.renderer.shadowMap.enabled = false;
-          this.weather.setShadowsEnabled(false);
-          this.weather.envEnabled = false;
-          this.postfx.rebuild(this.renderer, w, h, 0);
-          this.cam.mirrorEvery = 3;
-        } else if (this.qualityTier === 0) {
-          this.renderer.setPixelRatio(0.75);
-          this.renderer.setSize(w, h, false);
-          this.postfx.rebuild(this.renderer, w, h, 0);
-          this.cam.mirrorEvery = 4;
-        }
+        const nextTier = (this.qualityTier - 1) as 0 | 1 | 2;
+        this.qualityTier = nextTier;
+        this.applyQualityTier(nextTier);
       }
     } else {
       this.lowFpsTimer = Math.max(0, this.lowFpsTimer - realDt * 0.5);
@@ -1244,6 +1446,8 @@ export class GameManager {
       rain: post.rain,
       vignette: post.vignette,
     });
+
+    this.runtimeTickCount++;
 
     // demo synth beat scheduling (demo mode only)
     if (this.selection.source === 'demo' && this.demoMusicOn && this.state === 'playing') this.music.pump();

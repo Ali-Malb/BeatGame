@@ -11,6 +11,7 @@
  */
 
 import { clamp } from './utils';
+import type { InputState } from '../runtime/InputState';
 
 export interface InputSnapshot {
   throttle: number; // 0..1 smoothed
@@ -253,6 +254,22 @@ export class InputHandler {
     if (this.touchThrottle) kThrottle = Math.max(kThrottle, 1);
     if (this.touchBrake) kBrake = Math.max(kBrake, 1);
 
+    // ---- remote/external channel (remote runtime) ----
+    // A remote session or a scripted driver hands us the SAME normalized
+    // InputState every device produces, so a remote run feels like a local one
+    // and no second input pipeline exists.
+    this.tickRemote();
+    this.remoteTuck = false;
+    this.remoteLook = false;
+    if (this.remote) {
+      kSteer = this.remote.steer;
+      kThrottle = this.remote.throttle;
+      kBrake = this.remote.brake;
+      kRear = this.remote.rearBrake;
+      this.remoteTuck = this.remote.tuck;
+      this.remoteLook = this.remote.lookBack;
+    }
+
     // ---- keyboard one-shot events ----
     if (this.once('KeyC')) events.toggleCamera = true;
     if (this.once('Escape') || this.once('KeyP')) events.togglePause = true;
@@ -267,7 +284,7 @@ export class InputHandler {
 
     // tuck: keyboard is a toggle, gamepad hold ORs in
     if (this.once('ShiftLeft') || this.once('ShiftRight')) this.tuckToggled = !this.tuckToggled;
-    const tuckActive = this.tuckToggled || kTuck;
+    const tuckActive = this.tuckToggled || kTuck || this.remoteTuck;
 
     // ---- smoothing (analog progressive feel, scaled by settings §29) ----
     // sensitivity scales the COMMAND (reach partial travel faster); response
@@ -281,7 +298,7 @@ export class InputHandler {
     const steerRate = (Math.abs(kSteer) > 0 ? 7.5 : 9.5) * resp;
     this.steer = moveToward(this.steer, clamp(kSteer * sens, -1, 1), dt, steerRate);
     this.steer = clamp(this.steer, -1, 1);
-    this.lookBack = kLookBack;
+    this.lookBack = kLookBack || this.remoteLook;
 
     void kTuck; // held state folded into tuckActive below
     this.tuckActive = tuckActive;
@@ -291,6 +308,36 @@ export class InputHandler {
   /** true when any touch channel was engaged (for HUD hints) */
   get usingTouch(): boolean {
     return this.touchActive;
+  }
+
+  // ------------------------------------------------------------ remote input ----
+  private remote: InputState | null = null;
+  private remoteTuck = false;
+  private remoteLook = false;
+  private remoteSeenAt = 0;
+
+  /**
+   * Feed the normalized input state of an external owner (remote session input
+   * transport). Passing null hands control back to the local devices. A stale
+   * remote frame (older than `staleMs`) is dropped so a dead transport cannot
+   * leave the throttle pinned.
+   */
+  setRemote(state: InputState | null): void {
+    if (state === null) {
+      this.remote = null;
+      return;
+    }
+    this.remote = state;
+    this.remoteSeenAt = performance.now();
+  }
+
+  /** drop a remote input source that stopped sending */
+  tickRemote(staleMs = 600): void {
+    if (this.remote && performance.now() - this.remoteSeenAt > staleMs) this.remote = null;
+  }
+
+  get hasRemote(): boolean {
+    return this.remote !== null;
   }
 
   snapshot(): InputSnapshot {

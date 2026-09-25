@@ -69,6 +69,8 @@ interface Gate {
   mats: THREE.MeshBasicMaterial[];
   flash: number;
   phase: number;
+  /** judgment recorded when this gate was crossed (remote snapshot/telemetry) */
+  judgment: GateJudgment | null;
 }
 
 /** per-frame bike state (§4/§9): the render frame is only the OBSERVATION
@@ -186,6 +188,7 @@ export class RhythmGates {
   private trackOrigin = 60;
   private shatter: ShatterBurst;
   private tmpColor = new THREE.Color();
+  private qualityTier: 0 | 1 | 2 = 2;
 
   /** §4/§9: bike state at the END of the previous update — swept-segment origin */
   private prevBike: BikeFrame = { s: -Infinity, x: 0, audioT: 0 };
@@ -277,6 +280,7 @@ export class RhythmGates {
         mats,
         flash: 0,
         phase: i * 1.7,
+        judgment: null,
       });
     }
     this.shatter = new ShatterBurst(scene);
@@ -296,6 +300,16 @@ export class RhythmGates {
       ctx.fillRect(0, 0, 64, 64);
     }
     return new THREE.CanvasTexture(c);
+  }
+
+  /** Keep the timing/ judgment logic unchanged while reducing portal passes. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.qualityTier = tier;
+    for (const gate of this.gates) {
+      // The colored top beam remains the low-cost timing cue; the translucent
+      // field, halo, pad, and posts are omitted until a higher tier.
+      for (const child of gate.group.children) child.visible = tier > 0 || child === gate.bar;
+    }
   }
 
   /** swap in a new chart. trackOrigin = the bike's spline coordinate at song t=0. */
@@ -439,6 +453,10 @@ export class RhythmGates {
       const now = performance.now() * 0.001;
       for (const g of this.gates) {
         if (!g.active) continue;
+        // Keep the full spawn pool for timing, but only draw the low-tier
+        // portal while it is near the player; distant gates are not useful
+        // visual information and otherwise add one pass per chart note.
+        g.group.visible = this.qualityTier > 0 || (g.s >= bikeS - 40 && g.s <= bikeS + 260);
         // idle portal breathing on the energy field
         if (!g.judged) {
           (g.field.material as THREE.MeshBasicMaterial).opacity = 0.05 + 0.035 * (0.5 + 0.5 * Math.sin(now * 3.1 + g.phase));
@@ -454,8 +472,9 @@ export class RhythmGates {
           g.bar.scale.y = 1 + 1.6 * k;
           (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34 + 0.5 * k;
           (g.field.material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.5 * k;
-          g.pad.material instanceof THREE.MeshStandardMaterial &&
-            ((g.pad.material as THREE.MeshStandardMaterial).opacity = 0.45 + 0.5 * k);
+          if (g.pad.material instanceof THREE.MeshStandardMaterial) {
+            g.pad.material.opacity = 0.45 + 0.5 * k;
+          }
         }
         // §8 D: recycle only AFTER judgment (never mid-approach)
         if (g.judged && g.flash <= 0 && bikeS > g.s + 20) {
@@ -472,6 +491,7 @@ export class RhythmGates {
   }
 
   private judged(g: Gate, kind: GateJudgment): void {
+    g.judgment = kind;
     const c = this.tmpColor.setHex(LANE_COLORS[g.note.lane]);
     if (kind === 'miss') {
       g.flash = 0.0;
@@ -516,6 +536,29 @@ export class RhythmGates {
   private findFree(): Gate | null {
     for (const g of this.gates) if (!g.active) return g;
     return null;
+  }
+
+  /**
+   * Snapshot of the gates currently in the world (remote runtime). Includes
+   * the recorded judgment so a remote client can render live gate state from
+   * the authoritative server instead of guessing.
+   */
+  snapshotGates(): { id: number; s: number; lane: number; color: string; judged: boolean; judgment: 'perfect' | 'good' | 'miss' | null }[] {
+    const out: { id: number; s: number; lane: number; color: string; judged: boolean; judgment: 'perfect' | 'good' | 'miss' | null }[] = [];
+    for (let i = 0; i < this.gates.length; i++) {
+      const g = this.gates[i];
+      if (!g.active) continue;
+      const hex = LANE_COLORS[g.note.lane] ?? LANE_COLORS[0];
+      out.push({
+        id: i,
+        s: +g.s.toFixed(2),
+        lane: g.note.lane,
+        color: `#${hex.toString(16).padStart(6, '0')}`,
+        judged: g.judged,
+        judgment: g.judgment,
+      });
+    }
+    return out;
   }
 
   /** deterministic track position of the next un-judged note (debug HUD) */

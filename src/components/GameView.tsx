@@ -17,7 +17,8 @@ import type { GameSettingsData } from '@/game/core/GameSettings';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { clamp } from '@/game/core/utils';
-import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame, Settings as SettingsIcon } from 'lucide-react';
+import { Gamepad2, Keyboard, Gauge, Music2, Youtube, Play, Search, Upload, RotateCcw, Home, Pause, Heart, Zap, Flame, Settings as SettingsIcon, Server } from 'lucide-react';
+import RemoteSessionPanel, { type BeatmapPayload } from '@/components/RemoteSessionPanel';
 
 interface Popup {
   id: number;
@@ -118,6 +119,8 @@ export default function GameView() {
   const [analysisInfo, setAnalysisInfo] = useState<{ bpm: number; duration: number; sections: number; quality: string; notes: number } | null>(null);
   const [judgment, setJudgment] = useState<{ text: string; kind: string; id: number } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showRemote, setShowRemote] = useState(false);
+  const [beatmap, setBeatmap] = useState<BeatmapPayload | null>(null);
   const [settings, setSettings] = useState<GameSettingsData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -552,6 +555,11 @@ export default function GameView() {
         </div>
       )}
 
+      {/* ---------------------------------------------------- REMOTE RENDER */}
+      {showRemote && (
+        <RemoteSessionPanel beatmap={beatmap} onClose={() => setShowRemote(false)} />
+      )}
+
       {/* ------------------------------------------------------ MENU + SEARCH */}
       {menuOpen && (
         <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-black/70 via-black/40 to-black/85 backdrop-blur-[2px]">
@@ -603,6 +611,17 @@ export default function GameView() {
                   className="h-10 w-full border-white/20 bg-black/40 font-ui text-xs font-semibold tracking-widest text-white/85 hover:text-white"
                 >
                   <SettingsIcon className="mr-2 h-4 w-4" /> SETTINGS
+                </Button>
+                <Button
+                  onClick={() => {
+                    // remote play runs the demo track's beatmap on the server
+                    setBeatmap(gameRef.current?.demoBeatmap() ?? null);
+                    setShowRemote(true);
+                  }}
+                  variant="outline"
+                  className="h-10 w-full border-cyan-300/30 bg-cyan-400/5 font-ui text-xs font-semibold tracking-widest text-cyan-100/90 hover:bg-cyan-400/10 hover:text-white"
+                >
+                  <Server className="mr-2 h-4 w-4" /> REMOTE RENDER — SERVER STREAM
                 </Button>
                 <input
                   ref={fileInputRef}

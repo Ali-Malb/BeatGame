@@ -223,6 +223,8 @@ export class WeatherController {
   private renderer: THREE.WebGLRenderer;
   /** PMREM env generation is expensive on weak GPUs — disabled at low quality */
   envEnabled = true;
+  private detailTier: 0 | 1 | 2 = 2;
+  private lowSkyColor = new THREE.Color();
 
   constructor(
     renderer: THREE.WebGLRenderer,
@@ -480,6 +482,36 @@ export class WeatherController {
     this.sun.castShadow = on && this.current.sunLightIntensity > 0.5;
   }
 
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.detailTier = tier;
+    if (tier === 0) {
+      this.rainLines.visible = false;
+      this.embers.visible = false;
+      this.spray.visible = false;
+      this.sky.visible = false;
+      this.sunGlare.visible = false;
+      this.lowSkyColor.copy(this.current.horizon).lerp(this.current.mid, 0.45);
+      this.scene.background = this.lowSkyColor;
+    } else {
+      this.sky.visible = true;
+      this.sunGlare.visible = true;
+      this.scene.background = null;
+    }
+  }
+
+  /** Disable PMREM and release its render target on weak GPUs. */
+  setEnvironmentEnabled(enabled: boolean): void {
+    this.envEnabled = enabled;
+    if (enabled) {
+      this.refreshEnv();
+      return;
+    }
+    this.scene.environment = null;
+    const old = this.envRT;
+    this.envRT = null;
+    old?.dispose();
+  }
+
   get presetName(): string {
     return PRESETS[this.presetIndex].name;
   }
@@ -586,23 +618,24 @@ export class WeatherController {
 
     // bike headlight
     bike.joints.headlightSpot.intensity = damp(bike.joints.headlightSpot.intensity, this.current.headlights, 3, dt);
-    bike.joints.headlightSpot.visible = this.current.headlights > 1;
+    bike.joints.headlightSpot.visible = this.detailTier > 0 && this.current.headlights > 1;
 
     // -------- rain particles --------
     const rainAmt = this.current.rain;
-    this.rainLines.visible = rainAmt > 0.02;
+    this.rainLines.visible = this.detailTier > 0 && rainAmt > 0.02;
     if (this.rainLines.visible) {
       this.updateRain(dt, camera, playerVel, rainAmt);
     }
 
     // -------- embers --------
-    this.embers.visible = Math.max(this.current.embers, this.emberFloor) > 0.02;
+    this.embers.visible = this.detailTier > 0 && Math.max(this.current.embers, this.emberFloor) > 0.02;
     if (this.embers.visible) {
       this.updateEmbers(dt, playerPos, playerForward);
     }
 
     // -------- tire spray --------
-    this.updateSpray(dt, bike, traffic, highway, rainAmt);
+    this.spray.visible = this.detailTier > 0;
+    if (this.spray.visible) this.updateSpray(dt, bike, traffic, highway, rainAmt);
   }
 
   private updateRain(dt: number, camera: THREE.Camera, playerVel: THREE.Vector3, amount: number) {
@@ -676,6 +709,7 @@ export class WeatherController {
 
   private updateSpray(dt: number, bike: BikeController, traffic: TrafficManager, highway: Highway, rainAmt: number) {
     if (rainAmt < 0.05) {
+      this.spray.visible = false;
       // kill all
       for (let i = 0; i < this.sprayCount; i++) this.sprayLife[i] = 0;
       (this.spray.geometry.attributes.aLife as THREE.BufferAttribute).needsUpdate = true;
@@ -747,6 +781,10 @@ export class WeatherController {
     u.sunGlow.value = c.sunGlow;
     u.stars.value = c.starIntensity;
     (u.cloudTint.value as THREE.Color).copy(c.cloudTint);
+    if (this.detailTier === 0) {
+      this.lowSkyColor.copy(c.horizon).lerp(c.mid, 0.45);
+      this.scene.background = this.lowSkyColor;
+    }
 
     const scene = this.scene;
     if (scene.fog instanceof THREE.FogExp2) {

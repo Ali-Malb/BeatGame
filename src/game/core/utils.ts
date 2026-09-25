@@ -77,6 +77,8 @@ export function noise1(t: number, seed = 0): number {
   return f * 0.7 + f2 * 0.3;
 }
 
+import { headlessCanvas } from './headlessCanvas';
+
 /** 1D smooth periodic noise approximated from summed sines */
 export function smoothNoise(t: number, seed = 0): number {
   return (
@@ -87,8 +89,18 @@ export function smoothNoise(t: number, seed = 0): number {
   );
 }
 
-/** helper to build a canvas and draw on it */
+/**
+ * Helper to build a canvas and draw on it.
+ *
+ * Headless (server-side remote simulation) there is no DOM: the same
+ * procedural-texture code still runs so geometry and physics are identical,
+ * it just records onto a no-op canvas instead of a real one.
+ */
 export function makeCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+  if (typeof document === 'undefined') {
+    const fake = headlessCanvas(w, h);
+    return { canvas: fake as unknown as HTMLCanvasElement, ctx: fake.getContext('2d') as CanvasRenderingContext2D };
+  }
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;

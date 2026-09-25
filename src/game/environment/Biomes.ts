@@ -29,6 +29,8 @@ interface SceneryItem {
   s: number;
   side: number;
   spin: number;
+  /** whether the current biome placement selected this pooled item */
+  eligible?: boolean;
 }
 
 export class BiomeController {
@@ -42,6 +44,7 @@ export class BiomeController {
   private turbines: THREE.Object3D[] = [];
   private lightningTimer = 3;
   private rng = new RNG(0xb10be);
+  private qualityTier: 0 | 1 | 2 = 2;
 
   // shared geometries/materials
   private geoTower: THREE.BoxGeometry;
@@ -238,14 +241,23 @@ export class BiomeController {
     this.reseed(this.rng.int(1, 1e9));
   }
 
+  /** Keep pooled scenery deterministic while reducing its render budget. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.qualityTier = tier;
+    this.applyDetailVisibility();
+  }
+
   /** reposition every visible item around the player for the current biome */
   private reseed(seed: number): void {
     const rng = new RNG(seed);
     for (const it of this.items) {
       it.obj.visible = false;
-      this.free.push(it);
+      it.eligible = false;
     }
+    // Start each reseed with the complete pool.  The previous code pushed
+    // items and immediately cleared the list, leaving every biome empty.
     this.free.length = 0;
+    this.free.push(...this.items);
     const wantTowers = this.current === 0;
     const wantPylons = this.current === 1;
     const wantPines = this.current === 3;
@@ -261,6 +273,7 @@ export class BiomeController {
       for (let i = 0; i < count; i++) {
         const it = take(kind);
         if (!it) return;
+        it.eligible = true;
         it.obj.visible = true;
         it.s = rng.range(sMin, sMax);
         const side = rng.next() < 0.5 ? -1 : 1;
@@ -276,17 +289,29 @@ export class BiomeController {
     place('tree', wantTrees ? 12 : 0, -60, 620, 14, 28);
     place('turbine', wantTurbines ? 5 : 0, 60, 620, 55, 110);
 
-    // blossom glow visibility + petals
-    for (const it of this.items) {
-      const glow = (it as SceneryItem & { glow?: THREE.Mesh }).glow;
-      if (glow) glow.visible = this.current === 2 && it.obj.visible;
-    }
-    if (this.petals) this.petals.visible = this.current === 2;
+    this.applyDetailVisibility();
     // fog gets heavy in the mountain biome (extra punch on top of preset 1)
     const fog = this.scene.fog as THREE.FogExp2 | null;
     if (fog) {
       fog.density = this.current === 3 ? 0.006 : (this.weather as unknown as { current: { fogDensity: number } }).current.fogDensity;
     }
+  }
+
+  private applyDetailVisibility(): void {
+    const limits: Record<SceneryItem['kind'], number> = this.qualityTier === 0
+      ? { tower: 4, pylon: 2, pine: 3, tree: 4, turbine: 2, cable: 0 }
+      : this.qualityTier === 1
+        ? { tower: 12, pylon: 5, pine: 8, tree: 8, turbine: 3, cable: 0 }
+        : { tower: Number.POSITIVE_INFINITY, pylon: Number.POSITIVE_INFINITY, pine: Number.POSITIVE_INFINITY, tree: Number.POSITIVE_INFINITY, turbine: Number.POSITIVE_INFINITY, cable: Number.POSITIVE_INFINITY };
+    const seen: Record<SceneryItem['kind'], number> = { tower: 0, pylon: 0, pine: 0, tree: 0, turbine: 0, cable: 0 };
+    for (const it of this.items) {
+      const rank = seen[it.kind]++;
+      const visible = !!it.eligible && rank < limits[it.kind];
+      it.obj.visible = visible;
+      const glow = (it as SceneryItem & { glow?: THREE.Mesh }).glow;
+      if (glow) glow.visible = visible && this.current === 2 && this.qualityTier > 0;
+    }
+    if (this.petals) this.petals.visible = this.qualityTier > 0 && this.current === 2;
   }
 
   /** keep scenery distributed around the player; animate turbines/petals/lightning */

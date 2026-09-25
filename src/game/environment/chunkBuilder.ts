@@ -15,6 +15,7 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { RoadSpline, SAMPLE_STEP } from './roadSpline';
 import { concreteTexture, roadTexture, oncomingRoadTexture, signTexture, windowTexture, glowTexture } from './textures';
 import { RNG, clamp } from '../core/utils';
+import { districtKindAt, districtProfileAt, districtEdgeFade } from './districts';
 
 export const CHUNK_LEN = 100;
 
@@ -78,6 +79,18 @@ export class HighwayMaterials {
   reflector = new THREE.MeshStandardMaterial({ color: 0xd8d8d4, roughness: 0.7, metalness: 0.1 });
   /** reflector head (bright, catches headlights) */
   reflectorHead = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0.0, emissive: 0xfff8e0, emissiveIntensity: 0.55 });
+  /** shipping containers (port district) — a few believable paint colours */
+  containers = [0xb8452f, 0x2f6bb8, 0x3f8f4a, 0xc98a24, 0x7d7f86].map(
+    (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.78, metalness: 0.22 })
+  );
+  /** storage tank shells (industrial belt) */
+  tank = new THREE.MeshStandardMaterial({ color: 0xb9bec4, roughness: 0.42, metalness: 0.45 });
+  /** brick/concrete low-rise facades (suburbs) */
+  brick = new THREE.MeshStandardMaterial({ color: 0x5c4b41, roughness: 0.92, metalness: 0.0 });
+  /** parkway / suburb canopy foliage */
+  foliage = new THREE.MeshStandardMaterial({ color: 0x1c3324, roughness: 0.95, metalness: 0.0 });
+  /** harbour / canal water in the container port */
+  water = new THREE.MeshStandardMaterial({ color: 0x0a1620, roughness: 0.12, metalness: 0.85 });
 
   dispose() {
     for (const m of [
@@ -98,6 +111,11 @@ export class HighwayMaterials {
       this.paintEdge,
       this.reflector,
       this.reflectorHead,
+      ...this.containers,
+      this.tank,
+      this.brick,
+      this.foliage,
+      this.water,
     ])
       m.dispose();
   }
@@ -105,6 +123,44 @@ export class HighwayMaterials {
 
 interface GeomBuckets {
   [key: string]: THREE.BufferGeometry[];
+}
+
+/** Geometry-only payload sent from the chunk worker to the render thread. */
+export interface SerializedChunkPart {
+  bucket: string;
+  position: ArrayBuffer;
+  normal: ArrayBuffer | null;
+  uv: ArrayBuffer | null;
+  index: ArrayBuffer | null;
+}
+
+/** Shared bucket → material mapping used by both the worker and the renderer. */
+export function materialForChunkBucket(mats: HighwayMaterials, bucket: string): THREE.Material {
+  if (bucket.startsWith('windows')) return mats.windows[Number(bucket.slice(7))] ?? mats.windows[0];
+  if (bucket.startsWith('container')) return mats.containers[Number(bucket.slice(9))] ?? mats.containers[0];
+  switch (bucket) {
+    case 'asphalt': return mats.asphalt;
+    case 'asphaltOnc': return mats.asphaltOncoming;
+    case 'darkMetal': return mats.darkMetal;
+    case 'railing': return mats.railing;
+    case 'bridgePaint':
+    case 'bridgeCable': return mats.bridgePaint;
+    case 'lampHead': return mats.lampHead;
+    case 'lampCone': return mats.lampCone;
+    case 'lampPool': return mats.lampPool;
+    case 'sign': return mats.sign;
+    case 'blinkRed': return mats.blinkRed;
+    case 'blinkOrange': return mats.blinkOrange;
+    case 'paint': return mats.paint;
+    case 'paintEdge': return mats.paintEdge;
+    case 'reflector': return mats.reflector;
+    case 'reflectorHead': return mats.reflectorHead;
+    case 'tank': return mats.tank;
+    case 'brick': return mats.brick;
+    case 'foliage': return mats.foliage;
+    case 'water': return mats.water;
+    default: return mats.concrete;
+  }
 }
 
 function box(w: number, h: number, d: number, x = 0, y = 0, z = 0, rotY = 0, rotZ = 0, rotX = 0): THREE.BufferGeometry {
@@ -273,7 +329,25 @@ export interface ChunkBuildResult {
   geometries: THREE.BufferGeometry[];
 }
 
-export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkIndex: number, seed: number): ChunkBuildResult {
+export interface ChunkBuildOptions {
+  /** 0 keeps only the road/structural silhouette; 2 is the full scene. */
+  detail?: 0 | 1 | 2;
+}
+
+/** Buckets that remain in the software-renderer silhouette. */
+export const LOW_DETAIL_BUCKETS = new Set([
+  'asphalt',
+  'asphaltOnc',
+  'concrete',
+  'railing',
+  'bridgePaint',
+  'bridgeCable',
+  'paint',
+  'paintEdge',
+]);
+
+export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkIndex: number, seed: number, options: ChunkBuildOptions = {}): ChunkBuildResult {
+  const detail = options.detail ?? 2;
   const s0 = chunkIndex * CHUNK_LEN;
   const s1 = s0 + CHUNK_LEN;
   spline.ensure(s1 + 300);
@@ -312,6 +386,28 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     const slabW = half + 15.4; // from -15.4ish to right edge
     const slabCx = (half + 0.4 - 15.4) / 2;
     push('concrete', along(box(slabW, 0.55, SAMPLE_STEP + 0.02), pt, slabCx, 0, -0.6));
+  }
+
+  // ---------------- retaining walls + ground-level guard rail ----------------
+  // Where the viaduct rides high, a concrete retaining wall runs down the
+  // embankment; the ground-level service roads get their own guard rail, so the
+  // multi-level world reads as a real road network, not a floating slab.
+  for (let s = s0; s < s1 - 0.01; s += SAMPLE_STEP) {
+    spline.get(s, pt);
+    if (pt.y > 11 && !isBridge) {
+      const h = pt.y - 0.6;
+      for (const lat of [-24.5, 22.5]) {
+        push('concrete', along(box(1.0, h, SAMPLE_STEP + 0.02), pt, lat, 0, -h / 2));
+        push('darkMetal', along(box(1.35, 0.25, SAMPLE_STEP + 0.02), pt, lat, 0, 0.1 - h));
+      }
+    }
+  }
+  for (let s = Math.ceil(s0 / 12) * 12; s < s1; s += 12) {
+    spline.get(s, pt);
+    for (const lat of [9.7, -19.4]) {
+      push('railing', along(box(0.14, 0.09, 11.6), pt, lat, 0, -pt.y + 0.72));
+      push('darkMetal', along(box(0.12, 0.66, 0.12), pt, lat, 0, -pt.y + 0.4));
+    }
   }
 
   // ---------------- geometric lane markings (follow REAL lane boundaries) ----
@@ -545,11 +641,50 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     }
   }
 
+  // ---------------- interchange / exit ramp (landmark every ~1.7 km) -------
+  if (!isTunnel && !isBridge && s0 % 1700 < CHUNK_LEN) {
+    spline.get(s0 + 18, pt);
+    const steps = 15;
+    for (let i = 0; i < steps; i++) {
+      const fw = i * 8;
+      const lat = 8.6 + i * i * 0.135;
+      const lift = -0.3 - i * i * 0.062;
+      push('concrete', along(box(7.6, 0.7, 8.4), pt, lat, fw, lift));
+      for (const sgn of [-1, 1]) {
+        push('railing', along(box(0.16, 0.1, 8.2), pt, lat + sgn * 3.6, fw, lift + 0.95));
+        push('darkMetal', along(box(0.14, 0.9, 0.14), pt, lat + sgn * 3.6, fw, lift + 0.5));
+      }
+      if (i % 3 === 0) {
+        push('darkMetal', along(cyl(0.08, 0.11, 6.2, 0, 0, 0, 6), pt, lat - 3.4, fw, lift + 3.1));
+        push('lampHead', along(box(0.6, 0.14, 0.28), pt, lat - 4.4, fw, lift + 6.1));
+      }
+      if (i % 4 === 2) {
+        const h = Math.max(2.5, pt.y + lift - 0.4);
+        push('concrete', along(cyl(0.9, 1.1, h, 0, 0, 0, 8), pt, lat, fw, lift - h / 2 - 0.4));
+      }
+    }
+    // divergence gantry + exit board over the ramp
+    push('darkMetal', along(box(0.3, 5.8, 0.3), pt, 7.4, 12, 2.9));
+    push('darkMetal', along(box(0.3, 5.8, 0.3), pt, 18.6, 26, 2.9));
+    push('darkMetal', along(box(12.4, 0.4, 0.4), pt, 13, 19, 5.6));
+    const exitSign = new THREE.PlaneGeometry(3.6, 1.6);
+    exitSign.rotateY(Math.PI);
+    push('sign', along(exitSign, pt, 13, 19, 4.6));
+  }
+
   // ---------------- skyline buildings ----------------
+  // The low render tier keeps the deterministic spline/road structure but
+  // skips distant set dressing.  This removes the expensive city/factory
+  // geometry before it can compete with the render thread for CPU.
+  if (detail > 0) {
+  const dKind = districtKindAt(s0 + CHUNK_LEN / 2);
+  const dProf = districtProfileAt(s0 + CHUNK_LEN / 2);
+  const dEdge = districtEdgeFade(s0 + CHUNK_LEN / 2);
+  const density = 0.5 + 0.5 * dEdge;
   if (!isTunnel) {
     const variant = rng.int(0, 3);
     for (const side of [-1, 1]) {
-      const count = rng.int(3, 6);
+      const count = Math.max(1, Math.round(rng.int(3, 6) * dProf.skyline * density));
       for (let b = 0; b < count; b++) {
         const s = s0 + rng.range(0, CHUNK_LEN);
         spline.get(s, pt);
@@ -575,7 +710,7 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
           push('blinkRed', along(new THREE.SphereGeometry(0.55, 8, 6), pt, lat, 0, h - pt.y + 3.9));
         }
       }
-      if (rng.next() < 0.16) {
+      if (rng.next() < 0.18 * dProf.skyline) {
         const s = s0 + rng.range(0, CHUNK_LEN);
         spline.get(s, pt);
         const lat = rng.range(48, 95) * side;
@@ -586,39 +721,188 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
         push('blinkRed', along(new THREE.SphereGeometry(0.6, 8, 6), pt, lat, 0, 55 - pt.y));
       }
     }
+
+    // ---- district vocabulary: the roadside changes character by stretch ----
+    if (dKind === 'industrial') {
+      for (const side of [-1, 1]) {
+        // storage tank farm
+        for (let t = 0, tanks = rng.int(2, 4); t < tanks; t++) {
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const r = rng.range(5, 8.5);
+          const h = rng.range(8, 15);
+          const lat = side * rng.range(30, 78);
+          const lift = -pt.y + h / 2;
+          push('tank', along(cyl(r, r, h, 0, 0, 0, 14), pt, lat, 0, lift));
+          push('darkMetal', along(cyl(r + 0.25, r + 0.25, 0.7, 0, 0, 0, 14), pt, lat, 0, lift + h / 2));
+        }
+        // pipe rack: frame carrying three long pipes
+        spline.get(s0 + rng.range(10, 70), pt);
+        const rackLat = side * rng.range(16, 24);
+        push('darkMetal', along(box(0.35, 4.4, 0.35), pt, rackLat, -6, -pt.y + 2.2));
+        push('darkMetal', along(box(0.35, 4.4, 0.35), pt, rackLat, 6, -pt.y + 2.2));
+        push('darkMetal', along(box(2.6, 0.3, 14), pt, rackLat, 0, -pt.y + 4.3));
+        for (let p = 0; p < 3; p++) {
+          push('tank', along(cyl(0.28, 0.28, 13, 0, 0, 0, 8), pt, rackLat - 0.7 + p * 0.7, 0, -pt.y + 4.9));
+        }
+        // chimney stack with an aviation beacon
+        if (rng.next() < 0.5) {
+          spline.get(s0 + rng.range(10, 90), pt);
+          const h = rng.range(38, 72);
+          const lat = side * rng.range(36, 70);
+          push('concrete', along(cyl(2.0, 3.0, h, 0, 0, 0, 12), pt, lat, 0, -pt.y + h / 2));
+          push('blinkRed', along(new THREE.SphereGeometry(0.7, 8, 6), pt, lat, 0, -pt.y + h + 0.8));
+        }
+        // long low shed with a lit strip
+        if (rng.next() < 0.65) {
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const w = rng.range(26, 46);
+          const ww = rng.range(12, 20);
+          const hh = rng.range(7, 11);
+          const lat = side * rng.range(32, 58);
+          push(`windows${rng.int(0, 3)}`, along(box(w, hh, ww), pt, lat, 0, -pt.y + hh / 2));
+          push('lampHead', along(box(w * 0.9, 0.18, 0.22), pt, lat - side * (ww / 2 + 0.3), 0, -pt.y + hh * 0.62));
+        }
+      }
+    } else if (dKind === 'port') {
+      for (const side of [-1, 1]) {
+        // harbour water band (dark, reflective) beyond the quay
+        spline.get(s0 + CHUNK_LEN / 2, pt);
+        const quay = side * 92;
+        push('water', along(box(150, 0.1, CHUNK_LEN + 40), pt, quay + side * 78, 0, -pt.y + 0.06));
+        push('concrete', along(box(2.4, 3.2, CHUNK_LEN + 40), pt, quay, 0, -pt.y + 0.9));
+        // container rows
+        for (let r = 0, rows = rng.int(2, 4); r < rows; r++) {
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const lat = side * rng.range(34, 80);
+          const run = rng.int(4, 8);
+          const stackH = rng.int(2, 4);
+          for (let i = 0; i < run; i++) {
+            for (let y = 0; y < stackH; y++) {
+              push(
+                `container${rng.int(0, 4)}`,
+                along(box(2.44, 2.6, 12.2), pt, lat + i * 2.6 * side, 0, -pt.y + 1.35 + y * 2.66)
+              );
+            }
+          }
+        }
+        // ship-to-shore gantry crane straddling the yard
+        if (rng.next() < 0.6) {
+          spline.get(s0 + rng.range(20, 80), pt);
+          const lat = side * rng.range(40, 66);
+          const legH = rng.range(24, 34);
+          for (const dl of [-6, 6]) {
+            push('darkMetal', along(box(1.0, legH, 1.0), pt, lat + dl * side, 0, -pt.y + legH / 2));
+          }
+          push('darkMetal', along(box(14, 1.6, 1.6), pt, lat, 0, -pt.y + legH + 0.8));
+          push('darkMetal', along(box(2.0, 1.4, 34), pt, lat, -16 * side, -pt.y + legH + 1.4));
+          push('blinkRed', along(new THREE.SphereGeometry(0.5, 8, 6), pt, lat, 0, -pt.y + legH + 2.0));
+        }
+        // warehouse shed
+        if (rng.next() < 0.5) {
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const w = rng.range(30, 54);
+          const hh = rng.range(9, 13);
+          const lat = side * rng.range(26, 44);
+          push('concrete', along(box(w, hh, rng.range(16, 26)), pt, lat, 0, -pt.y + hh / 2));
+          push('lampHead', along(box(w * 0.85, 0.2, 0.24), pt, lat, 0, -pt.y + hh + 0.2));
+        }
+      }
+    } else if (dKind === 'suburb') {
+      for (const side of [-1, 1]) {
+        for (let b = 0, blocks = rng.int(2, 4); b < blocks; b++) {
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const floors = rng.int(2, 5);
+          const h = floors * 3.1;
+          const w = rng.range(13, 21);
+          const d = rng.range(12, 19);
+          const lat = side * rng.range(24, 58);
+          push(`windows${rng.int(0, 3)}`, along(box(w, h, d), pt, lat, 0, -pt.y + h / 2));
+          push('brick', along(box(w + 0.6, 0.5, d + 0.6), pt, lat, 0, -pt.y + h + 0.25));
+          push('darkMetal', along(box(w * 0.5, 1.6, d * 0.5), pt, lat, 0, -pt.y + h + 1.3));
+          if (rng.next() < 0.5) {
+            push('sign', along(box(2.6, 0.9, 0.12), pt, lat - side * (w / 2 + 0.2), 0, -pt.y + 4.4));
+          }
+        }
+        // frontage street trees
+        for (let t = 0; t < 4; t++) {
+          spline.get(s0 + 8 + t * 24 + rng.range(0, 6), pt);
+          const lat = side * rng.range(13, 18);
+          const hh = rng.range(6, 10);
+          push('darkMetal', along(cyl(0.18, 0.26, 2.4, 0, 0, 0, 6), pt, lat, 0, -pt.y + 1.2));
+          push('foliage', along(cyl(0.2, 2.4, hh, 0, 0, 0, 7), pt, lat, 0, -pt.y + 2.4 + hh / 2));
+        }
+      }
+    } else if (dKind === 'park') {
+      for (const side of [-1, 1]) {
+        // dense canopy line just outside the barrier
+        for (let t = 0; t < 7; t++) {
+          spline.get(s0 + 6 + t * 14 + rng.range(0, 5), pt);
+          const lat = side * rng.range(11, 30);
+          const hh = rng.range(7, 13);
+          push('darkMetal', along(cyl(0.16, 0.24, 2.2, 0, 0, 0, 6), pt, lat, 0, -pt.y + 1.1));
+          push('foliage', along(cyl(0.25, 3.0, hh, 0, 0, 0, 7), pt, lat, 0, -pt.y + 2.2 + hh / 2));
+        }
+        if (rng.next() < 0.5) {
+          spline.get(s0 + rng.range(20, 80), pt);
+          const lat = side * rng.range(45, 90);
+          const h = rng.range(28, 44);
+          push('darkMetal', along(box(3.2, h, 3.2), pt, lat, 0, -pt.y + h / 2));
+          push('darkMetal', along(box(16, 1.2, 1.2), pt, lat, 0, -pt.y + h - 4));
+          push('darkMetal', along(box(11, 1.0, 1.0), pt, lat, 0, -pt.y + h - 10));
+        }
+      }
+    } else {
+      // urban core: lit storefront band + projecting signage at street level
+      for (const side of [-1, 1]) {
+        for (let b = 0; b < 2; b++) {
+          if (rng.next() > 0.6) continue;
+          spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+          const lat = side * rng.range(20, 34);
+          const w = rng.range(9, 18);
+          const h = rng.range(5, 9);
+          push('brick', along(box(w, h, rng.range(10, 16)), pt, lat, 0, -pt.y + h / 2));
+          push(`windows${rng.int(0, 3)}`, along(box(w * 0.9, 1.1, 0.2), pt, lat - side * 5.2, 0, -pt.y + 2.6));
+          push('sign', along(box(3.4, 1.1, 0.14), pt, lat - side * 6.2, 0, -pt.y + 5.4));
+        }
+      }
+    }
+
+    // ---- far horizon band: silhouettes + scattered light clusters (depth) ---
+    for (let b = 0, farN = rng.int(2, 5); b < farN; b++) {
+      const side = rng.next() < 0.5 ? -1 : 1;
+      spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+      const lat = side * rng.range(150, 430);
+      const w = rng.range(24, 60);
+      const h = rng.range(30, 130);
+      push(`windows${rng.int(0, 3)}`, along(buildingBox(w, h, w * 0.8), pt, lat, 0, -pt.y + h / 2));
+    }
+    for (let i = 0, clusters = rng.int(4, 12); i < clusters; i++) {
+      const side = rng.next() < 0.5 ? -1 : 1;
+      spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+      const lat = side * rng.range(70, 380);
+      const n = rng.int(3, 7);
+      for (let k = 0; k < n; k++) {
+        const h = rng.range(1.2, 3.4);
+        push(
+          'lampHead',
+          along(box(rng.range(1.6, 4.4), h, rng.range(1.6, 4.4)), pt, lat + rng.range(-9, 9), 0, -pt.y + h / 2 + rng.range(0, 26))
+        );
+      }
+    }
+  }
   }
 
   // ---------------- assemble meshes ----------------
   const group = new THREE.Group();
   const geometries: THREE.BufferGeometry[] = [];
-  const matFor: Record<string, THREE.Material> = {
-    asphalt: mats.asphalt,
-    asphaltOnc: mats.asphaltOncoming,
-    concrete: mats.concrete,
-    darkMetal: mats.darkMetal,
-    railing: mats.railing,
-    bridgePaint: mats.bridgePaint,
-    bridgeCable: mats.bridgePaint,
-    lampHead: mats.lampHead,
-    lampCone: mats.lampCone,
-    lampPool: mats.lampPool,
-    sign: mats.sign,
-    windows0: mats.windows[0],
-    windows1: mats.windows[1],
-    windows2: mats.windows[2],
-    windows3: mats.windows[3],
-    blinkRed: mats.blinkRed,
-    blinkOrange: mats.blinkOrange,
-    paint: mats.paint,
-    paintEdge: mats.paintEdge,
-    reflector: mats.reflector,
-    reflectorHead: mats.reflectorHead,
-  };
   for (const [bucket, list] of Object.entries(geos)) {
     const merged = BufferGeometryUtils.mergeGeometries(list, false);
     for (const g of list) if (g !== merged) g.dispose();
     if (!merged || merged.attributes.position.count === 0) continue;
-    const mesh = new THREE.Mesh(merged, matFor[bucket] ?? mats.concrete);
+    const mesh = new THREE.Mesh(merged, materialForChunkBucket(mats, bucket));
+    // Keep the logical bucket on the mesh so workers can serialize geometry
+    // without constructing the render-thread's texture-backed materials.
+    mesh.userData.bucket = bucket;
     mesh.castShadow = false;
     mesh.receiveShadow = bucket === 'asphalt' || bucket === 'asphaltOnc' || bucket === 'concrete';
     mesh.matrixAutoUpdate = false;

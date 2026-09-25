@@ -35,6 +35,7 @@ export class TrafficLights {
   private candidates: Candidate[] = [];
   /** global intensity scale (0 in daylight, 1 at night) — set by Weather */
   intensity = 0;
+  private enabled = true;
 
   constructor(scene: THREE.Scene) {
     for (let i = 0; i < WHITE_COUNT; i++) {
@@ -56,8 +57,19 @@ export class TrafficLights {
 
   private nCandidates = 0;
 
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (!enabled) {
+      for (const l of [...this.whites, ...this.reds]) {
+        l.intensity = 0;
+        l.visible = false;
+      }
+    }
+  }
+
   update(dt: number, playerPos: THREE.Vector3, traffic: TrafficManager): void {
     void dt;
+    if (!this.enabled) return;
     const want = this.intensity > 0.02;
     if (!want) {
       for (const l of this.whites) {

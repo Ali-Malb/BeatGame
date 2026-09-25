@@ -248,8 +248,10 @@ async function main(): Promise<void> {
     () => (window as unknown as { __game: { dspClock: { getAudioTime(): number } } }).__game.dspClock.getAudioTime() > 8,
     { timeout: 30000 },
   );
-  await uncrash(); // mid-sweep tumble → still proves steering range after recovery
+  // sample before recovery: uncrash() intentionally recenters the bike in a
+  // clear lane, so reading x only after it would erase the steering evidence.
   const x1 = await readX();
+  await uncrash(); // mid-sweep tumble → keep the rest of the suite playable
   await page.keyboard.up('KeyA');
   await page.keyboard.down('KeyD');
   await page.waitForFunction(
