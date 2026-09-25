@@ -40,6 +40,7 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed'>('idle');
   const statusListenersRef = useRef<(() => void)[]>([]);
+  const stoppingRef = useRef(false);
 
   // capability probe before any session exists (client side + server probe)
   useEffect(() => {
@@ -136,14 +137,26 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
   };
 
   const stop = async () => {
-    for (const off of statusListenersRef.current) off();
-    statusListenersRef.current = [];
-    await runtimeRef.current?.dispose();
-    runtimeRef.current = null;
-    setVideoUrl(null);
-    setSnapshot(null);
-    setPhase('idle');
-    onClose();
+    if (stoppingRef.current) return; // double-close guard
+    stoppingRef.current = true;
+    if (process.env.NODE_ENV === 'development') console.log('[remote] dispose started');
+    try {
+      for (const off of statusListenersRef.current) off();
+      statusListenersRef.current = [];
+      await runtimeRef.current?.dispose();
+      if (process.env.NODE_ENV === 'development') console.log('[remote] dispose done');
+    } catch (err) {
+      console.error('[remote] dispose failed:', err);
+    } finally {
+      runtimeRef.current = null;
+      setVideoUrl(null);
+      setSnapshot(null);
+      setPhase('idle');
+      if (process.env.NODE_ENV === 'development') {
+        (window as unknown as { __remoteDisposed?: boolean }).__remoteDisposed = true;
+      }
+      onClose();
+    }
   };
 
   useEffect(() => {

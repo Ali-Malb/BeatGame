@@ -162,11 +162,32 @@ async function main() {
     body: JSON.stringify({ clientId: 'remote-e2e', state: inputWire(0.4, 1) }),
   });
   check('input accepted with server ack', in1.status === 200 && !!in1.json?.ack?.serverTime, in1.json?.ack);
-  const status1 = await jfetch(`/api/remote/session/${id}`);
-  const vBefore = status1.json?.snapshot?.bike?.v ?? 0;
-  await sleep(1500);
-  const status2 = await jfetch(`/api/remote/session/${id}`);
-  const vAfter = status2.json?.snapshot?.bike?.v ?? 0;
+  // the run launches at the 240 km/h rhythm pace in 6th gear, so full throttle
+  // only just beats aero drag — wait for the countdown to end and hold throttle
+  // until the sim shows a real positive speed delta (drag equilibrium is slow).
+  const tPlaying0 = Date.now();
+  while ((await jfetch(`/api/remote/session/${id}`)).json?.snapshot?.state !== 'playing' && Date.now() - tPlaying0 < 15000) {
+    await sleep(300);
+  }
+  await jfetch(`/api/remote/session/${id}/input`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId: 'remote-e2e', state: inputWire(0, 1) }),
+  });
+  const vBefore = (await jfetch(`/api/remote/session/${id}`)).json?.snapshot?.bike?.v ?? 0;
+  let vAfter = vBefore;
+  const tAccel0 = Date.now();
+  while (Date.now() - tAccel0 < 12000) {
+    await sleep(1200);
+    // keep the throttle pinned every beat (inputs carry the client's hold)
+    await jfetch(`/api/remote/session/${id}/input`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clientId: 'remote-e2e', state: inputWire(0, 1) }),
+    });
+    vAfter = (await jfetch(`/api/remote/session/${id}`)).json?.snapshot?.bike?.v ?? 0;
+    if (vAfter > vBefore + 0.5) break;
+  }
   check('input actually drives the server sim (bike accelerated)', vAfter > Math.max(vBefore, 8), { vBefore: +vBefore.toFixed(1), vAfter: +vAfter.toFixed(1) });
 
   console.log('== 5. SSE snapshot stream ==');

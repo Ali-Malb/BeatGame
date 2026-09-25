@@ -52,6 +52,8 @@ export interface RemoteStartOptions extends StartOptions {
 
 const INPUT_HZ = 30;
 const HEARTBEAT_MS = 2000;
+/** bounded teardown: dispose must resolve even when the server is busy */
+const TEARDOWN_TIMEOUT_MS = 3000;
 
 /** reconnect with capped exponential backoff — never gives up while the UI lives */
 const BACKOFF_BASE_MS = 800;
@@ -416,15 +418,28 @@ export class RemoteRuntime implements GameRuntime {
     this.input = { ...NEUTRAL_INPUT };
   }
 
+  /**
+   * Ask the server to destroy the session. Bounded: a saturated software
+   * renderer can hold the server loop for many seconds, and the panel close
+   * path awaits this — so it must always resolve promptly. If the DELETE
+   * cannot be delivered, the server's idle sweeper reaps the abandoned
+   * session anyway (no client records survive pruneStaleClients).
+   */
   private async teardownSession(): Promise<void> {
     if (!this.sessionId) return;
     const id = this.sessionId;
     this.sessionId = null;
     this.connected = false;
     try {
-      await fetch(`${this.baseUrl}/api/remote/session/${id}`, { method: 'DELETE' });
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), TEARDOWN_TIMEOUT_MS) : null;
+      try {
+        await fetch(`${this.baseUrl}/api/remote/session/${id}`, { method: 'DELETE', signal: ctrl?.signal });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     } catch {
-      /* server already reaped it */
+      /* server already reaped it / request abandoned — the idle sweeper is the backstop */
     }
   }
 }
