@@ -437,6 +437,60 @@ export class GameManager {
   get frameCount(): number {
     return this.renderer.info.render.frame;
   }
+
+  // ------------------------------------------------------- remote beatmap ----
+  /**
+   * The current rhythm chart as a transferable beatmap (remote runtime).
+   *
+   * The DSP analysis stays client-side and deterministic; the SERVER then owns
+   * the clock, the gate spacing (trackPositionFor) and every judgment — the
+   * beatmap is data, timing authority is not.
+   */
+  exportBeatmap(): {
+    notes: { time: number; lane: number; type: string; strength: number; subdivision: number }[];
+    bpm: number;
+    duration: number;
+    firstBeat: number;
+    beatSec: number;
+    sections: { start: number; end: number; kind: string; energy: number }[];
+  } | null {
+    const chart = this.chart;
+    if (!chart) return null;
+    return {
+      notes: chart.notes.map((n) => ({
+        time: n.time,
+        lane: n.lane,
+        type: n.type,
+        strength: n.strength,
+        subdivision: n.subdivision,
+      })),
+      bpm: chart.bpm,
+      duration: chart.duration,
+      firstBeat: chart.firstBeat,
+      beatSec: chart.beatSec,
+      sections: chart.sections.map((s) => ({ start: s.start, end: s.end, kind: s.kind, energy: s.energy })),
+    };
+  }
+
+  /** beatmap for the built-in demo track without starting a local run */
+  demoBeatmap(): ReturnType<GameManager['exportBeatmap']> {
+    const analysis = this.demoAnalysis();
+    const chart = buildChart(analysis);
+    return {
+      notes: chart.notes.map((n) => ({
+        time: n.time,
+        lane: n.lane,
+        type: n.type,
+        strength: n.strength,
+        subdivision: n.subdivision,
+      })),
+      bpm: chart.bpm,
+      duration: chart.duration,
+      firstBeat: chart.firstBeat,
+      beatSec: chart.beatSec,
+      sections: chart.sections.map((s) => ({ start: s.start, end: s.end, kind: s.kind, energy: s.energy })),
+    };
+  }
   get usingTouch(): boolean {
     return this.input.usingTouch;
   }

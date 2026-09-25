@@ -35,8 +35,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         return;
       }
       if (!frame) {
-        // keepalive comment so proxies do not drop an idle stream
-        controller.enqueue(encoder.encode(`--${BOUNDARY}\r\nX-Wait: 1\r\n\r\n`));
+        // no frame yet: enqueue nothing. A bodyless part would be an invalid
+        // multipart chunk and browsers abort the stream on it, so we simply let
+        // pull() be called again instead.
         return;
       }
       const header = `--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.buffer.byteLength}\r\nX-Seq: ${frame.seq}\r\nX-At: ${frame.at}\r\n\r\n`;

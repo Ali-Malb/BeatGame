@@ -8,8 +8,6 @@
  * textures at module scope.
  */
 
-import { installDomShim } from './domShim';
-
-installDomShim();
+import './domShim';
 
 export {};
