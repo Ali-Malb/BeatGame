@@ -490,6 +490,59 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
     push('reflectorHead', along(box(0.08, 0.08, 0.02), pt, edge, 0, 0.72));
   }
 
+  // ---------------- roadside infrastructure variety (deterministic) --------
+  // Utility cabinets, chain-link service fences, ground billboards and
+  // high-mast industrial lighting break the "same barrier every chunk"
+  // repetition without growing draw calls (all merged into shared buckets).
+  if (!isTunnel) {
+    // chain-link service fence along the outer shoulder (occasional runs)
+    if (rng.next() < 0.4) {
+      const fs = s0 + rng.range(0, 30);
+      const fe = Math.min(s1, fs + rng.range(50, 100));
+      push('railing', barrierStrip(spline, fs, fe, (s) => dHalf(s) + 1.5, 2.4, 0.05, false));
+      for (let s = Math.ceil(fs / 4) * 4; s < fe; s += 4) {
+        spline.get(s, pt);
+        push('darkMetal', along(box(0.08, 2.5, 0.08), pt, dHalf(s) + 1.5, 0, 1.25 - pt.y));
+      }
+    }
+    // utility cabinets at the base of the retaining wall + conduit up the wall
+    for (let i = 0, n = rng.int(1, 3); i < n; i++) {
+      const us = s0 + rng.range(5, 90);
+      spline.get(us, pt);
+      const side = rng.next() < 0.5 ? -1 : 1;
+      const lat = side * (dHalf(us) + rng.range(2.5, 5));
+      const h = rng.range(1.1, 1.9);
+      push('darkMetal', along(box(rng.range(1.0, 1.8), h, rng.range(0.5, 0.9)), pt, lat, 0, h / 2 - pt.y));
+      push('darkMetal', along(cyl(0.05, 0.05, rng.range(3, 7), 0, 0, 0, 6), pt, lat + 0.3, 0, h + 2.5 - pt.y));
+    }
+    // ground-mounted roadside billboard on a scaffold
+    if (rng.next() < 0.45) {
+      const bs = s0 + rng.range(10, 60);
+      spline.get(bs, pt);
+      const side = rng.next() < 0.5 ? -1 : 1;
+      const lat = side * (dHalf(bs) + rng.range(7, 12));
+      const hgt = rng.range(10, 16);
+      for (const dl of [-2.2, 2.2]) {
+        push('darkMetal', along(box(0.4, hgt, 0.4), pt, lat + dl * side, 0, hgt / 2 - pt.y));
+      }
+      push('sign', along(box(0.35, 5.5, 12), pt, lat, 0, hgt + 2.75 - pt.y));
+      push('lampHead', along(box(0.5, 0.15, 12), pt, lat - side * 0.6, 0, hgt + 5.65 - pt.y));
+    }
+    // industrial high-mast lighting: a single 28 m tower with a 4-head crown
+    if (districtKindAt(s0 + CHUNK_LEN / 2) === 'industrial' && rng.next() < 0.5) {
+      const hs = s0 + rng.range(15, 70);
+      spline.get(hs, pt);
+      const side = rng.next() < 0.5 ? -1 : 1;
+      const lat = side * (dHalf(hs) + rng.range(4, 7));
+      const mh = 28;
+      push('concrete', along(cyl(0.35, 0.7, mh, 0, 0, 0, 8), pt, lat, 0, mh / 2 - pt.y));
+      for (let k = 0; k < 4; k++) {
+        const a = (k / 4) * Math.PI;
+        push('lampHead', along(box(0.9, 0.2, 0.5), pt, lat + Math.cos(a) * 1.2, Math.sin(a) * 1.2, mh - 0.4 - pt.y));
+      }
+    }
+  }
+
   // ---------------- viaduct support pillars (skipped on bridge) ----------------
   if (!isBridge) {
     for (let s = s0 + 12; s < s1; s += 35) {
@@ -867,14 +920,53 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
       }
     }
 
-    // ---- far horizon band: silhouettes + scattered light clusters (depth) ---
-    for (let b = 0, farN = rng.int(2, 5); b < farN; b++) {
+    // ---- deep horizon band: layered skyline depth ------------------------
+    // The horizon is the largest visual surface on a 300 km/h ride. Two
+    // deterministic depth layers behind the roadside, plus distant arterial
+    // light ribbons, give the skyline parallax without growing draw calls:
+    // everything merges into the shared emissive/basic buckets. Towers are
+    // COMPOSITES (setback upper masses, antenna masts, aviation beacons) so
+    // the horizon never reads as a row of repeated cubes.
+    const layers: { latMin: number; latMax: number; hMin: number; hMax: number; count: number }[] = [
+      { latMin: 145, latMax: 250, hMin: 30, hMax: 92, count: rng.int(3, 5) },
+      { latMin: 250, latMax: 430, hMin: 46, hMax: 150, count: rng.int(3, 6) },
+    ];
+    for (const layer of layers) {
+      for (let b = 0; b < layer.count; b++) {
+        const side = rng.next() < 0.5 ? -1 : 1;
+        spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
+        const lat = side * rng.range(layer.latMin, layer.latMax);
+        const w = rng.range(20, 52);
+        const h = rng.range(layer.hMin, layer.hMax);
+        const d = w * rng.range(0.6, 0.95);
+        push(`windows${rng.int(0, 3)}`, along(buildingBox(w, h, d), pt, lat, 0, -pt.y + h / 2));
+        // setback crown on tall composites; occasional antenna + beacon
+        if (h > 58 && rng.next() < 0.8) {
+          const uw = w * rng.range(0.45, 0.7);
+          const uh = h * rng.range(0.18, 0.38);
+          push(`windows${rng.int(0, 3)}`, along(buildingBox(uw, uh, d * 0.7), pt, lat + rng.range(-w * 0.15, w * 0.15), 0, -pt.y + h + uh / 2));
+          if (rng.next() < 0.5) {
+            push('darkMetal', along(box(uw * 0.14, rng.range(4, 9), uw * 0.14), pt, lat, 0, -pt.y + h + uh + 2.5));
+            push('blinkRed', along(new THREE.SphereGeometry(0.5, 8, 6), pt, lat, 0, -pt.y + h + uh + 7.2));
+          }
+        } else if (rng.next() < 0.4) {
+          push('darkMetal', along(box(w * 0.3, 3, d * 0.3), pt, lat, 0, -pt.y + h + 1.5));
+        }
+      }
+    }
+    // distant lit arterials: long thin emissive bars with low-rise glow blocks
+    // hugging them — reads as streets/freeways weaving through the skyline
+    for (let i = 0, ribbons = rng.int(2, 4); i < ribbons; i++) {
       const side = rng.next() < 0.5 ? -1 : 1;
       spline.get(s0 + rng.range(0, CHUNK_LEN), pt);
-      const lat = side * rng.range(150, 430);
-      const w = rng.range(24, 60);
-      const h = rng.range(30, 130);
-      push(`windows${rng.int(0, 3)}`, along(buildingBox(w, h, w * 0.8), pt, lat, 0, -pt.y + h / 2));
+      const lat = side * rng.range(190, 430);
+      const run = rng.range(60, 160);
+      push('lampHead', along(box(run, rng.range(0.5, 1.1), 2.2, 0, 0, 0, rng.range(-0.5, 0.5)), pt, lat, 0, -pt.y + rng.range(1.5, 5)));
+      for (let k = 0, n = rng.int(2, 5); k < n; k++) {
+        const w = rng.range(10, 26);
+        const h = rng.range(6, 20);
+        push(`windows${rng.int(0, 3)}`, along(buildingBox(w, h, w * 0.7), pt, lat + rng.range(-run * 0.4, run * 0.4), 0, -pt.y + h / 2));
+      }
     }
     for (let i = 0, clusters = rng.int(4, 12); i < clusters; i++) {
       const side = rng.next() < 0.5 ? -1 : 1;
@@ -882,11 +974,13 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
       const lat = side * rng.range(70, 380);
       const n = rng.int(3, 7);
       for (let k = 0; k < n; k++) {
-        const h = rng.range(1.2, 3.4);
-        push(
-          'lampHead',
-          along(box(rng.range(1.6, 4.4), h, rng.range(1.6, 4.4)), pt, lat + rng.range(-9, 9), 0, -pt.y + h / 2 + rng.range(0, 26))
-        );
+        // slender light columns of varied height — streetlights/office
+        // lighting seen far away, not glowing cubes
+        const h = rng.range(4, 9);
+        const lat2 = lat + rng.range(-9, 9);
+        const z2 = rng.range(0, 26);
+        push('darkMetal', along(box(0.25, h, 0.25), pt, lat2, 0, -pt.y + h / 2 + z2));
+        push('lampHead', along(box(0.9, 0.5, 0.9), pt, lat2, 0, -pt.y + h + 0.2 + z2));
       }
     }
   }
