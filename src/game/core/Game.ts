@@ -238,6 +238,9 @@ export class GameManager {
 
   private qualityTier = 2;
   private lowFpsTimer = 0;
+  /** SwiftShader/llvmpipe cannot sustain the full scene; start it on the
+   * lightweight path instead of waiting for the adaptive downgrade timer. */
+  private softwareRenderer = false;
 
   private tmpVel = new THREE.Vector3();
   private tmpFwd = new THREE.Vector3(0, 0, 1);
@@ -258,6 +261,10 @@ export class GameManager {
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const gl = this.renderer.getContext();
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL: number } | null;
+    const rendererName = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : '';
+    this.softwareRenderer = /swiftshader|llvmpipe|software/i.test(rendererName);
 
     this.highway = new Highway(this.scene);
     this.weather = new WeatherController(this.renderer, this.scene, this.highway.mats);
@@ -517,39 +524,57 @@ export class GameManager {
     // graphics
     this.postfx.bloomEnabled = s.bloom;
     this.postfx.motionBlurEnabled = s.motionBlur;
-    this.weather.envEnabled = s.reflections;
-    this.cam.mirrorEvery = s.mirrorQuality === 'off' ? 9999 : s.mirrorQuality === 'low' ? 4 : s.mirrorQuality === 'medium' ? 2 : 1;
-    this.cam.setMirrorRes(s.mirrorQuality === 'high' ? 384 : 256);
     this.cam.fovOffset = s.fovOffset;
-    this.applyQualityTier(s.quality);
+    const quality = this.softwareRenderer ? 0 : s.quality;
+    // Keep the in-memory settings view honest when the platform force-selects
+    // the software-safe tier; this does not overwrite the user's persisted
+    // preference.
+    if (this.softwareRenderer) this.settings.current.quality = 0;
+    this.applyQualityTier(quality);
     this.showFps = s.showFps;
   }
 
   /** graphics quality tier → concrete renderer budget (0 low … 2 high) */
   private applyQualityTier(tier: 0 | 1 | 2): void {
+    this.qualityTier = tier;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    if (tier === 0) {
-      this.renderer.setPixelRatio(Math.min(0.75, window.devicePixelRatio));
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = false;
-      this.weather.setShadowsEnabled(false);
-      this.weather.envEnabled = false;
-      this.postfx.rebuild(this.renderer, w, h, 0);
-      this.cam.mirrorEvery = 9999;
-    } else if (tier === 1) {
-      this.renderer.setPixelRatio(1);
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = true;
-      this.weather.setShadowsEnabled(true);
-      this.postfx.rebuild(this.renderer, w, h, 1);
-    } else {
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
-      this.renderer.setSize(w, h, false);
-      this.renderer.shadowMap.enabled = true;
-      this.weather.setShadowsEnabled(true);
-      this.postfx.rebuild(this.renderer, w, h, 2);
+    const low = tier === 0;
+    const pixelRatio = low
+      ? (this.softwareRenderer ? 0.42 : 0.5)
+      : tier === 1
+        ? 1
+        : Math.min(window.devicePixelRatio || 1, 1.6);
+    this.renderer.setPixelRatio(pixelRatio);
+    this.renderer.setSize(w, h, false);
+    this.renderer.shadowMap.enabled = tier === 2;
+    this.weather.setQualityTier(tier);
+    this.weather.setShadowsEnabled(tier === 2);
+    this.weather.setEnvironmentEnabled(tier === 2 && this.settings.current.reflections);
+
+    this.postfx.setQualityTier(tier);
+    if (low) {
+      // These are hard low-tier overrides; the user's toggles are restored
+      // when a higher tier is selected again.
+      this.postfx.bloomEnabled = false;
+      this.postfx.motionBlurEnabled = false;
     }
+
+    const mirrorSetting = this.settings.current.mirrorQuality;
+    const mirrorEnabled = tier > 0 && mirrorSetting !== 'off';
+    const configuredCadence = mirrorSetting === 'low' ? 4 : mirrorSetting === 'medium' ? 2 : 1;
+    this.cam.setMirrorsEnabled(mirrorEnabled);
+    this.cam.mirrorEvery = mirrorEnabled ? (tier === 1 ? Math.max(4, configuredCadence) : configuredCadence) : 9999;
+    this.cam.setMirrorRes(tier === 0 ? 128 : mirrorSetting === 'high' ? 384 : tier === 1 ? 128 : 256);
+
+    this.highway.setQualityTier(tier);
+    this.biomes.setQualityTier(tier);
+    this.bike.setQualityTier(tier);
+    this.gates.setQualityTier(tier);
+    this.traffic.setQualityTier(tier);
+    this.trafficLights.setEnabled(tier > 0);
+    this.streetLights.setEnabled(tier > 0);
+    this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0);
   }
 
   /** route volume changes into the live audio graph (real gains, §30) */
@@ -1196,23 +1221,9 @@ export class GameManager {
       this.lowFpsTimer += realDt;
       if (this.lowFpsTimer > 2.0) {
         this.lowFpsTimer = 0;
-        this.qualityTier--;
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        if (this.qualityTier === 1) {
-          this.renderer.setPixelRatio(1);
-          this.renderer.setSize(w, h, false);
-          this.renderer.shadowMap.enabled = false;
-          this.weather.setShadowsEnabled(false);
-          this.weather.envEnabled = false;
-          this.postfx.rebuild(this.renderer, w, h, 0);
-          this.cam.mirrorEvery = 3;
-        } else if (this.qualityTier === 0) {
-          this.renderer.setPixelRatio(0.75);
-          this.renderer.setSize(w, h, false);
-          this.postfx.rebuild(this.renderer, w, h, 0);
-          this.cam.mirrorEvery = 4;
-        }
+        const nextTier = (this.qualityTier - 1) as 0 | 1 | 2;
+        this.qualityTier = nextTier;
+        this.applyQualityTier(nextTier);
       }
     } else {
       this.lowFpsTimer = Math.max(0, this.lowFpsTimer - realDt * 0.5);

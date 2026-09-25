@@ -90,6 +90,7 @@ export class BikeController {
   private hbYaw = 0;
   private shiftBlip = 0;
   private lastJointS = 0;
+  private detailTier: 0 | 1 | 2 = 2;
 
   // world frame cache
   worldPos = new THREE.Vector3();
@@ -113,6 +114,22 @@ export class BikeController {
     this.group.add(this.brakeLight);
     scene.add(this.group);
     this.lastJointS = Math.floor(this.model.s / JOINT_EVERY) * JOINT_EVERY;
+  }
+
+  /** Keep the cockpit readable on weak GPUs without changing bike physics. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.detailTier = tier;
+    const detailed = tier > 0;
+    this.rider.group.visible = detailed;
+    this.joints.wheelF.visible = detailed;
+    this.joints.wheelR.visible = detailed;
+    this.joints.fork.visible = detailed;
+    this.joints.swingarm.visible = detailed;
+    this.joints.mirrorL.visible = detailed;
+    this.joints.mirrorR.visible = detailed;
+    this.joints.dashboard.visible = detailed;
+    this.joints.headlightSpot.visible = detailed;
+    this.brakeLight.visible = detailed;
   }
 
   /** one physics substep (call at fixed timestep for CCD safety) */
@@ -200,20 +217,22 @@ export class BikeController {
     const pegL = new THREE.Vector3(-0.17, 0.34, -0.02);
     const pegR = new THREE.Vector3(0.17, 0.34, -0.02);
     const snap = this.shiftBlip > 0 ? Math.sin((this.shiftBlip / 0.15) * Math.PI) : 0;
-    this.rider.setTorsoVisible(!cockpit);
-    this.rider.update(
-      {
-        tuck: m.tuck,
-        lean: m.rollAngle,
-        shiftBlip: snap,
-        brakePull: clamp(-m.aLong / 9, 0, 1),
-        vibration: m.rpm / 1000 + time,
-      },
-      gripL,
-      gripR,
-      pegL,
-      pegR
-    );
+    if (this.detailTier > 0) {
+      this.rider.setTorsoVisible(!cockpit);
+      this.rider.update(
+        {
+          tuck: m.tuck,
+          lean: m.rollAngle,
+          shiftBlip: snap,
+          brakePull: clamp(-m.aLong / 9, 0, 1),
+          vibration: m.rpm / 1000 + time,
+        },
+        gripL,
+        gripR,
+        pegL,
+        pegR
+      );
+    }
   }
 
   // ---------------------------------------------------------------- crash ----

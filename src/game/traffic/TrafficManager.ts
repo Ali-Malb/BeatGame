@@ -92,6 +92,7 @@ export class TrafficManager {
   private activeScratch: TrafficCar[] = [];
   private activeCount_ = 0;
   private sprayVecs: THREE.Vector3[] = [];
+  private renderTier: 0 | 1 | 2 = 2;
 
   /** set by Weather: headlights on (night/rain) */
   headlightsOn = false;
@@ -161,6 +162,13 @@ export class TrafficManager {
 
   get activeCount(): number {
     return this.activeCount_;
+  }
+
+  /** Change only the visual detail budget; traffic simulation remains intact. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.renderTier = tier;
+    for (const car of this.pool) car.model.setDetailTier(tier);
+    for (const oc of this.oncoming) oc.group.visible = tier > 0 && oc.active;
   }
 
   /** positions of active vehicle rear axles for tire spray emitters (no alloc) */
@@ -493,6 +501,9 @@ export class TrafficManager {
       g.position.set(p.x + p.rx * car.x, p.y, p.z + p.rz * car.x);
       g.rotation.y = p.yaw;
       g.rotation.z = -Math.atan(p.kappa * car.v * car.v * 0.02);
+      // The simulation keeps every actor; low rendering only draws the nearby
+      // slice so traffic density does not multiply the software-GL cost.
+      g.visible = this.renderTier > 0 || Math.abs(car.s - playerS) < 150;
       // lights — cone meshes REMOVED (§24): emissive lenses + pavement pools
       // carry the night look; real PointLights come from TrafficLights
       car.model.headMat.color.setRGB(1.35, 1.3, 1.15);
@@ -530,7 +541,7 @@ export class TrafficManager {
           oc.s = playerS + 200 + this.rng.range(0, 260);
           oc.v = ms(this.rng.range(62, 104));
           oc.off = this.rng.range(9.4, 13.2);
-          oc.group.visible = true;
+          oc.group.visible = this.renderTier > 0;
         }
         continue;
       }

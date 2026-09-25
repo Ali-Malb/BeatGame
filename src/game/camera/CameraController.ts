@@ -199,6 +199,7 @@ export class CameraController {
   private mirrorCamL: THREE.PerspectiveCamera;
   private mirrorCamR: THREE.PerspectiveCamera;
   mirrorEvery = 2; // render each mirror every Nth frame (2 → ~30 Hz @60fps)
+  private mirrorsEnabled = true;
   /** mirror render-target resolution (settings: Mirror Quality, §31) */
   mirrorRes = MIRROR_W;
   /** user FOV offset added to every mode's base FOV (settings, §31) */
@@ -268,6 +269,11 @@ export class CameraController {
   resize(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+  }
+
+  setMirrorsEnabled(enabled: boolean): void {
+    this.mirrorsEnabled = enabled;
+    if (!enabled) this.mirrorEvery = 9999;
   }
 
   /** Mirror Quality setting: RT width in px (off handled via mirrorEvery=9999) */
@@ -453,7 +459,7 @@ export class CameraController {
    * actually judgeable.
    */
   renderMirror(renderer: THREE.WebGLRenderer, bike: BikeController): void {
-    if (this.mode !== 'cockpit') return;
+    if (!this.mirrorsEnabled || this.mode !== 'cockpit') return;
     this.mirrorFrame++;
     if (this.mirrorFrame % this.mirrorEvery !== 0) return;
 

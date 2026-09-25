@@ -125,6 +125,44 @@ interface GeomBuckets {
   [key: string]: THREE.BufferGeometry[];
 }
 
+/** Geometry-only payload sent from the chunk worker to the render thread. */
+export interface SerializedChunkPart {
+  bucket: string;
+  position: ArrayBuffer;
+  normal: ArrayBuffer | null;
+  uv: ArrayBuffer | null;
+  index: ArrayBuffer | null;
+}
+
+/** Shared bucket → material mapping used by both the worker and the renderer. */
+export function materialForChunkBucket(mats: HighwayMaterials, bucket: string): THREE.Material {
+  if (bucket.startsWith('windows')) return mats.windows[Number(bucket.slice(7))] ?? mats.windows[0];
+  if (bucket.startsWith('container')) return mats.containers[Number(bucket.slice(9))] ?? mats.containers[0];
+  switch (bucket) {
+    case 'asphalt': return mats.asphalt;
+    case 'asphaltOnc': return mats.asphaltOncoming;
+    case 'darkMetal': return mats.darkMetal;
+    case 'railing': return mats.railing;
+    case 'bridgePaint':
+    case 'bridgeCable': return mats.bridgePaint;
+    case 'lampHead': return mats.lampHead;
+    case 'lampCone': return mats.lampCone;
+    case 'lampPool': return mats.lampPool;
+    case 'sign': return mats.sign;
+    case 'blinkRed': return mats.blinkRed;
+    case 'blinkOrange': return mats.blinkOrange;
+    case 'paint': return mats.paint;
+    case 'paintEdge': return mats.paintEdge;
+    case 'reflector': return mats.reflector;
+    case 'reflectorHead': return mats.reflectorHead;
+    case 'tank': return mats.tank;
+    case 'brick': return mats.brick;
+    case 'foliage': return mats.foliage;
+    case 'water': return mats.water;
+    default: return mats.concrete;
+  }
+}
+
 function box(w: number, h: number, d: number, x = 0, y = 0, z = 0, rotY = 0, rotZ = 0, rotX = 0): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(w, h, d);
   if (rotX) g.rotateX(rotX);
@@ -291,7 +329,25 @@ export interface ChunkBuildResult {
   geometries: THREE.BufferGeometry[];
 }
 
-export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkIndex: number, seed: number): ChunkBuildResult {
+export interface ChunkBuildOptions {
+  /** 0 keeps only the road/structural silhouette; 2 is the full scene. */
+  detail?: 0 | 1 | 2;
+}
+
+/** Buckets that remain in the software-renderer silhouette. */
+export const LOW_DETAIL_BUCKETS = new Set([
+  'asphalt',
+  'asphaltOnc',
+  'concrete',
+  'railing',
+  'bridgePaint',
+  'bridgeCable',
+  'paint',
+  'paintEdge',
+]);
+
+export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkIndex: number, seed: number, options: ChunkBuildOptions = {}): ChunkBuildResult {
+  const detail = options.detail ?? 2;
   const s0 = chunkIndex * CHUNK_LEN;
   const s1 = s0 + CHUNK_LEN;
   spline.ensure(s1 + 300);
@@ -617,6 +673,10 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
   }
 
   // ---------------- skyline buildings ----------------
+  // The low render tier keeps the deterministic spline/road structure but
+  // skips distant set dressing.  This removes the expensive city/factory
+  // geometry before it can compete with the render thread for CPU.
+  if (detail > 0) {
   const dKind = districtKindAt(s0 + CHUNK_LEN / 2);
   const dProf = districtProfileAt(s0 + CHUNK_LEN / 2);
   const dEdge = districtEdgeFade(s0 + CHUNK_LEN / 2);
@@ -830,47 +890,19 @@ export function buildChunk(spline: RoadSpline, mats: HighwayMaterials, chunkInde
       }
     }
   }
+  }
 
   // ---------------- assemble meshes ----------------
   const group = new THREE.Group();
   const geometries: THREE.BufferGeometry[] = [];
-  const matFor: Record<string, THREE.Material> = {
-    asphalt: mats.asphalt,
-    asphaltOnc: mats.asphaltOncoming,
-    concrete: mats.concrete,
-    darkMetal: mats.darkMetal,
-    railing: mats.railing,
-    bridgePaint: mats.bridgePaint,
-    bridgeCable: mats.bridgePaint,
-    lampHead: mats.lampHead,
-    lampCone: mats.lampCone,
-    lampPool: mats.lampPool,
-    sign: mats.sign,
-    windows0: mats.windows[0],
-    windows1: mats.windows[1],
-    windows2: mats.windows[2],
-    windows3: mats.windows[3],
-    blinkRed: mats.blinkRed,
-    blinkOrange: mats.blinkOrange,
-    paint: mats.paint,
-    paintEdge: mats.paintEdge,
-    reflector: mats.reflector,
-    reflectorHead: mats.reflectorHead,
-    tank: mats.tank,
-    brick: mats.brick,
-    foliage: mats.foliage,
-    water: mats.water,
-    container0: mats.containers[0],
-    container1: mats.containers[1],
-    container2: mats.containers[2],
-    container3: mats.containers[3],
-    container4: mats.containers[4],
-  };
   for (const [bucket, list] of Object.entries(geos)) {
     const merged = BufferGeometryUtils.mergeGeometries(list, false);
     for (const g of list) if (g !== merged) g.dispose();
     if (!merged || merged.attributes.position.count === 0) continue;
-    const mesh = new THREE.Mesh(merged, matFor[bucket] ?? mats.concrete);
+    const mesh = new THREE.Mesh(merged, materialForChunkBucket(mats, bucket));
+    // Keep the logical bucket on the mesh so workers can serialize geometry
+    // without constructing the render-thread's texture-backed materials.
+    mesh.userData.bucket = bucket;
     mesh.castShadow = false;
     mesh.receiveShadow = bucket === 'asphalt' || bucket === 'asphaltOnc' || bucket === 'concrete';
     mesh.matrixAutoUpdate = false;

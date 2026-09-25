@@ -188,6 +188,7 @@ export class RhythmGates {
   private trackOrigin = 60;
   private shatter: ShatterBurst;
   private tmpColor = new THREE.Color();
+  private qualityTier: 0 | 1 | 2 = 2;
 
   /** §4/§9: bike state at the END of the previous update — swept-segment origin */
   private prevBike: BikeFrame = { s: -Infinity, x: 0, audioT: 0 };
@@ -299,6 +300,16 @@ export class RhythmGates {
       ctx.fillRect(0, 0, 64, 64);
     }
     return new THREE.CanvasTexture(c);
+  }
+
+  /** Keep the timing/ judgment logic unchanged while reducing portal passes. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.qualityTier = tier;
+    for (const gate of this.gates) {
+      // The colored top beam remains the low-cost timing cue; the translucent
+      // field, halo, pad, and posts are omitted until a higher tier.
+      for (const child of gate.group.children) child.visible = tier > 0 || child === gate.bar;
+    }
   }
 
   /** swap in a new chart. trackOrigin = the bike's spline coordinate at song t=0. */
@@ -442,6 +453,10 @@ export class RhythmGates {
       const now = performance.now() * 0.001;
       for (const g of this.gates) {
         if (!g.active) continue;
+        // Keep the full spawn pool for timing, but only draw the low-tier
+        // portal while it is near the player; distant gates are not useful
+        // visual information and otherwise add one pass per chart note.
+        g.group.visible = this.qualityTier > 0 || (g.s >= bikeS - 40 && g.s <= bikeS + 260);
         // idle portal breathing on the energy field
         if (!g.judged) {
           (g.field.material as THREE.MeshBasicMaterial).opacity = 0.05 + 0.035 * (0.5 + 0.5 * Math.sin(now * 3.1 + g.phase));
@@ -457,8 +472,9 @@ export class RhythmGates {
           g.bar.scale.y = 1 + 1.6 * k;
           (g.mats[2] as THREE.MeshBasicMaterial).opacity = 0.34 + 0.5 * k;
           (g.field.material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.5 * k;
-          g.pad.material instanceof THREE.MeshStandardMaterial &&
-            ((g.pad.material as THREE.MeshStandardMaterial).opacity = 0.45 + 0.5 * k);
+          if (g.pad.material instanceof THREE.MeshStandardMaterial) {
+            g.pad.material.opacity = 0.45 + 0.5 * k;
+          }
         }
         // §8 D: recycle only AFTER judgment (never mid-approach)
         if (g.judged && g.flash <= 0 && bikeS > g.s + 20) {

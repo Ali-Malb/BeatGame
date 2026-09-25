@@ -18,6 +18,7 @@ export class StreetLights {
   private lights: THREE.PointLight[] = [];
   /** global intensity scale (0 in daylight, 1 at night) */
   intensity = 0;
+  private enabled = true;
   private pt = { x: 0, y: 0, z: 0, yaw: 0, rx: 1, rz: 0, kappa: 0, s: 0, slope: 0 };
 
   constructor(scene: THREE.Scene) {
@@ -29,7 +30,18 @@ export class StreetLights {
     }
   }
 
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (!enabled) {
+      for (const l of this.lights) {
+        l.intensity = 0;
+        l.visible = false;
+      }
+    }
+  }
+
   update(_dt: number, highway: Highway, playerS: number): void {
+    if (!this.enabled) return;
     const scale = this.intensity;
     if (scale <= 0.02) {
       for (const l of this.lights) {

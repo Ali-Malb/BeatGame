@@ -147,6 +147,11 @@ export class PostFX {
   /** settings toggles — actually gate the effects (§31) */
   bloomEnabled = true;
   motionBlurEnabled = true;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  /** Low tier bypasses the composer entirely; this is the single biggest
+   * render-cost saving on software/weak GPUs. */
+  private directRender = false;
   private bloom: UnrealBloomPass;
   private finalPass: ShaderPass;
   private renderPass: RenderPass;
@@ -159,6 +164,8 @@ export class PostFX {
   private bloomBase = 0.6;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, width: number, height: number) {
+    this.scene = scene;
+    this.camera = camera;
     this.renderPass = new RenderPass(scene, camera);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(width / 2, height / 2), 0.6, 0.5, 0.82);
     this.finalPass = new ShaderPass(FinalShader);
@@ -179,8 +186,24 @@ export class PostFX {
     return composer;
   }
 
+  /** Select the low-cost render path before rebuilding targets. */
+  setQualityTier(tier: 0 | 1 | 2): void {
+    this.directRender = tier === 0;
+    this.bloom.enabled = !this.directRender && this.bloomEnabled;
+    this.finalPass.enabled = !this.directRender;
+    this.outputPass.enabled = !this.directRender;
+  }
+
   /** rebuild render targets at a new resolution / MSAA level (adaptive quality) */
   rebuild(renderer: THREE.WebGLRenderer, cssW: number, cssH: number, samples: number) {
+    // The low tier renders directly to the canvas.  Keep the dormant composer
+    // sized for a later upgrade, but do not allocate MSAA targets on the hot
+    // path while it is unused.
+    if (this.directRender) {
+      this.composer.setPixelRatio(renderer.getPixelRatio());
+      this.composer.setSize(cssW, cssH);
+      return;
+    }
     const pr = renderer.getPixelRatio();
     const old = this.composer;
     this.composer = this.buildComposer(renderer, Math.floor(cssW * pr), Math.floor(cssH * pr), samples);
@@ -229,8 +252,9 @@ export class PostFX {
     u.uChromaRed.value = this.chromaValue > 0.01 ? 1 : 0;
     this.bloomBase = params.bloom;
     this.bloom.strength = this.bloomEnabled ? params.bloom + this.bloomPulseValue : 0;
-    // disabled bloom skips its render cost entirely
-    this.bloom.enabled = this.bloomEnabled;
+    // disabled bloom skips its render cost entirely; low tier also bypasses
+    // the whole composer in render().
+    this.bloom.enabled = !this.directRender && this.bloomEnabled;
   }
 
   resize(width: number, height: number) {
@@ -240,6 +264,10 @@ export class PostFX {
   }
 
   render() {
+    if (this.directRender) {
+      this.composer.renderer.render(this.scene, this.camera);
+      return;
+    }
     this.composer.render();
   }
 
