@@ -27,6 +27,10 @@ const FinalShader = {
     uWindSpeed: { value: 0 },
     uChroma: { value: 0 },
     uChromaRed: { value: 0 },
+    // rhythm hit wash: lane-colored chromatic ring that rolls outward from the
+    // PERFECT crossing — stronger visual distinction between PERFECT and GOOD
+    uHitWash: { value: 0 },
+    uHitColor: { value: new THREE.Color(0.35, 0.9, 1.2) },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -119,6 +123,18 @@ const FinalShader = {
         col.r += uChromaRed * 0.12 * uChroma;
       }
 
+      // rhythm hit wash: lane-colored chromatic ring expanding from the hit —
+      // red/blue channel split rolls outward so a PERFECT reads as an event,
+      // while the wash stays additive and brief enough to never mask traffic
+      if (uHitWash > 0.001) {
+        float hd = distance(vUv, vec2(0.5, 0.44));
+        float ring = smoothstep(0.62, 0.18, hd) * (1.0 - smoothstep(0.78, 0.34, hd * 0.5 + (1.0 - uHitWash) * 0.62));
+        vec2 hdir = (vUv - vec2(0.5, 0.44)) * uHitWash * 0.008;
+        vec3 hsplit = vec3(texture2D(tDiffuse, vUv + hdir).r, col.g, texture2D(tDiffuse, vUv - hdir).b);
+        col = mix(col, hsplit, ring * 0.55);
+        col += uHitColor * ring * uHitWash * 0.28;
+      }
+
       // grading: saturation + contrast (linear space, pre-ACES)
       float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
       col = mix(vec3(lum), col, uSaturation);
@@ -161,6 +177,7 @@ export class PostFX {
   private fadeValue = 0;
   private chromaValue = 0;
   private bloomPulseValue = 0;
+  private hitWashValue = 0;
   private bloomBase = 0.6;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, width: number, height: number) {
@@ -227,6 +244,12 @@ export class PostFX {
     this.bloomPulseValue = Math.max(this.bloomPulseValue, amount);
   }
 
+  /** lane-colored hit wash + chromatic ring (PERFECT gate crossing) */
+  hitWash(amount: number, laneColor: THREE.Color) {
+    this.hitWashValue = Math.max(this.hitWashValue, amount);
+    (this.finalPass.uniforms.uHitColor.value as THREE.Color).copy(laneColor);
+  }
+
   setFade(v: number) {
     this.fadeTarget = clamp01(v);
     if (v >= 0.999) this.fadeValue = 1; // snap when fully black
@@ -237,6 +260,9 @@ export class PostFX {
     this.fadeValue += (this.fadeTarget - this.fadeValue) * (this.fadeTarget > this.fadeValue ? 1 : Math.min(1, dt * 2.2));
     this.chromaValue = Math.max(0, this.chromaValue - dt * 1.8);
     this.bloomPulseValue = Math.max(0, this.bloomPulseValue - dt * 3.2);
+    // hit wash is intentionally FASTER than the crash chroma: a percussive
+    // accent, decayed hard so it never lingers over the next gate
+    this.hitWashValue = Math.max(0, this.hitWashValue - dt * 4.5);
     const u = this.finalPass.uniforms;
     const blurK = this.motionBlurEnabled && params.speedKmh > 180 ? Math.pow(Math.min(1, (params.speedKmh - 180) / 120), 2) : 0;
     u.uSpeedBlur.value = blurK;
@@ -250,6 +276,7 @@ export class PostFX {
     u.uWindSpeed.value = Math.min(1, params.speedKmh / 300);
     u.uChroma.value = this.chromaValue;
     u.uChromaRed.value = this.chromaValue > 0.01 ? 1 : 0;
+    u.uHitWash.value = this.hitWashValue;
     this.bloomBase = params.bloom;
     this.bloom.strength = this.bloomEnabled ? params.bloom + this.bloomPulseValue : 0;
     // disabled bloom skips its render cost entirely; low tier also bypasses

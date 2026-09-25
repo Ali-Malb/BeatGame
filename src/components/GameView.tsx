@@ -299,12 +299,22 @@ export default function GameView() {
 
           {/* JUDGMENT (center, no layout shift) */}
           {judgment && (
-            <div key={judgment.id} className="pointer-events-none absolute left-1/2 top-[24%] -translate-x-1/2">
+            <div key={judgment.id} className="pointer-events-none absolute left-1/2 top-[24%] -translate-x-1/2 text-center">
               <div
                 className={`animate-popup font-mono text-4xl font-black italic tracking-[0.18em] drop-shadow-[0_2px_14px_rgba(0,0,0,0.95)] ${judgmentColor(judgment.kind)}`}
               >
                 {judgment.text}
               </div>
+              {/* combo escalation: a live chain readout under PERFECT, tinted by streak depth */}
+              {judgment.kind === 'gatePerfect' && tel.combo >= 5 && (
+                <div
+                  className={`animate-popup font-mono text-sm font-bold tracking-[0.3em] ${
+                    tel.combo >= 50 ? 'text-amber-300' : tel.combo >= 20 ? 'text-orange-300' : 'text-cyan-200'
+                  } drop-shadow-[0_1px_8px_rgba(0,0,0,0.95)]`}
+                >
+                  {tel.combo} CHAIN
+                </div>
+              )}
             </div>
           )}
 

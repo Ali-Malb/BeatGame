@@ -41,7 +41,7 @@ import { BufferPlayer } from '../audio/BufferPlayer';
 import { SongLoader, SongLoadError, type LoadedSong } from '../audio/SongLoader';
 import { analyzeBuffer, energyAt, sectionAt, type Analysis, type AnalysisSection } from '../audio/AudioAnalyzer';
 import { buildChart, type RhythmChart, type ChartNote } from '../rhythm/RhythmChart';
-import { RhythmGates, type GateEvent } from '../rhythm/RhythmGates';
+import { RhythmGates, LANE_COLORS, type GateEvent } from '../rhythm/RhythmGates';
 import { trackPositionFor, RHYTHM_SPEED } from '../rhythm/trackPosition';
 import { parseCueSheet, type ParsedCueSheet } from '../audio/CueSheetParser';
 import { buildCueSheet, LOOP_SEC } from '../audio/cueSheet';
@@ -1120,10 +1120,15 @@ export class GameManager {
         this.audio.gatePing(true);
         if (this.selection.source === 'demo') (this.music as unknown as { duck?: (a: number, s: number) => void }).duck?.(0.3, 0.4);
         else this.bufferPlayer?.duck(0.3, 0.4);
-        this.postfx.bloomPulse(0.55);
-        this.postfx.flash(0.16, new THREE.Color(0.5, 0.8, 1.2));
-        this.cam.addFovKick(3, 0.12);
-        this.cam.addTrauma(0.14);
+        // --- PERFECT juice: combo escalation (capped so chains stay readable) ---
+        const combo = this.scoring.combo;
+        const esc = Math.min(1, (combo - 1) / 24); // 0 at x1 → 1 at x25
+        const laneColor = LANE_COLORS[ev.note.lane] ?? LANE_COLORS[0];
+        this.postfx.bloomPulse(0.55 + esc * 0.35);
+        this.postfx.hitWash(0.85 + esc * 0.3, new THREE.Color(laneColor));
+        this.postfx.flash(0.16 + esc * 0.06, new THREE.Color(laneColor).multiplyScalar(0.55));
+        this.cam.addFovKick(3 + esc * 2.5, 0.12);
+        this.cam.addTrauma(0.14 + esc * 0.06);
         this.callbacks.onPopup?.(
           this.scoring.combo > 1 ? `PERFECT +${1000}` : 'PERFECT',
           Math.round(1000 * this.scoring.multiplier),

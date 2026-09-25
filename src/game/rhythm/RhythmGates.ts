@@ -54,7 +54,8 @@ const SPAWN_AHEAD_M = 900;
 const LATE_MISS_SEC = 2.0;
 const POOL_SIZE = 48;
 
-const LANE_COLORS = [0x35e0ff, 0xff4fd8, 0xffb43a, 0x7dff5a];
+/** lane accent colors — shared with the PERFECT hit-wash post effect */
+export const LANE_COLORS = [0x35e0ff, 0xff4fd8, 0xffb43a, 0x7dff5a];
 
 interface Gate {
   active: boolean;
