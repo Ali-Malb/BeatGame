@@ -251,6 +251,9 @@ export class GameManager {
   constructor(private canvas: HTMLCanvasElement, private callbacks: GameCallbacks = {}) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,
+      // The low-tier path is already fill-rate constrained on software GL;
+      // retain a larger drawing buffer for visual clarity while keeping MSAA
+      // off so the quality gain does not reintroduce a full-scene stall.
       antialias: false,
       powerPreference: 'high-performance',
       stencil: false,
@@ -541,7 +544,7 @@ export class GameManager {
     const h = window.innerHeight;
     const low = tier === 0;
     const pixelRatio = low
-      ? (this.softwareRenderer ? 0.42 : 0.5)
+      ? (this.softwareRenderer ? 0.68 : 0.75)
       : tier === 1
         ? 1
         : Math.min(window.devicePixelRatio || 1, 1.6);
