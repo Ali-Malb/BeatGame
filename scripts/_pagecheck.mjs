@@ -1,0 +1,13 @@
+import puppeteer from 'puppeteer';
+const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox','--disable-setuid-sandbox','--use-gl=swiftshader','--enable-unsafe-swiftshader','--window-size=1280,720','--autoplay-policy=no-user-gesture-required'] });
+const page = await browser.newPage();
+await page.setViewport({ width: 1280, height: 720 });
+const errors = [];
+page.on('pageerror', (e) => errors.push('PAGEERROR: ' + String(e).slice(0, 300)));
+page.on('console', (m) => { if (m.type() === 'error') errors.push('CONSOLE: ' + m.text().slice(0, 300)); });
+await page.goto('http://localhost:3000', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await new Promise((r) => setTimeout(r, 25000));
+const body = await page.evaluate(() => document.body.innerText.replace(/\n+/g, ' | ').slice(0, 400));
+console.log('BODY:', body);
+console.log('ERRORS:', errors.slice(0, 6));
+await browser.close();
