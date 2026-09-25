@@ -11,7 +11,7 @@
 import puppeteer from 'puppeteer';
 import { Scoring, multiplierForCombo } from '../src/game/core/Scoring';
 
-const BASE = 'http://localhost:3000';
+const BASE = process.env.SMOKE_URL ?? 'http://localhost:3000';
 const SKIP = new Set(process.argv.slice(2));
 
 let pass = 0;

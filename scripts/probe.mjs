@@ -1,0 +1,10 @@
+import puppeteer from 'puppeteer';
+const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox','--disable-gpu-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist'] });
+const page = await browser.newPage();
+page.on('pageerror', (e) => console.log('PAGEERROR:', e.message));
+page.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE:', m.text().slice(0,200)); });
+await page.goto('http://localhost:3000/', { waitUntil: 'networkidle2', timeout: 120000 });
+await new Promise(r => setTimeout(r, 6000));
+const has = await page.evaluate(() => ({ game: !!window.__game }));
+console.log(JSON.stringify(has));
+await browser.close();

@@ -21,6 +21,7 @@
 import * as THREE from 'three';
 import { InputHandler } from './Input';
 import { Highway } from '../environment/Highway';
+import { CityBlock } from '../environment/CityBlock';
 import { WeatherController } from '../environment/Weather';
 import { BiomeController, BIOME_NAMES } from '../environment/Biomes';
 import { TrafficManager, NearMissEvent } from '../traffic/TrafficManager';
@@ -41,7 +42,7 @@ import { BufferPlayer } from '../audio/BufferPlayer';
 import { SongLoader, SongLoadError, type LoadedSong } from '../audio/SongLoader';
 import { analyzeBuffer, energyAt, sectionAt, type Analysis, type AnalysisSection } from '../audio/AudioAnalyzer';
 import { buildChart, type RhythmChart, type ChartNote } from '../rhythm/RhythmChart';
-import { RhythmGates, type GateEvent } from '../rhythm/RhythmGates';
+import { RhythmGates, LANE_COLORS, type GateEvent } from '../rhythm/RhythmGates';
 import { trackPositionFor, RHYTHM_SPEED } from '../rhythm/trackPosition';
 import { parseCueSheet, type ParsedCueSheet } from '../audio/CueSheetParser';
 import { buildCueSheet, LOOP_SEC } from '../audio/cueSheet';
@@ -246,6 +247,7 @@ export class GameManager {
   private tmpFwd = new THREE.Vector3(0, 0, 1);
   private trafficLights: TrafficLights;
   private streetLights: StreetLights;
+  private cityBlock: CityBlock;
   private demoLyricCues: LyricCue[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private callbacks: GameCallbacks = {}) {
@@ -276,6 +278,7 @@ export class GameManager {
     this.traffic = new TrafficManager(this.highway, this.scene);
     this.trafficLights = new TrafficLights(this.scene);
     this.streetLights = new StreetLights(this.scene);
+    this.cityBlock = new CityBlock(this.scene, this.highway);
     this.bike = new BikeController(this.highway, this.scene);
     this.cam = new CameraController(this.scene, window.innerWidth / Math.max(1, window.innerHeight));
     this.cam.attachMirrors(this.bike);
@@ -577,6 +580,7 @@ export class GameManager {
     this.traffic.setQualityTier(tier);
     this.trafficLights.setEnabled(tier > 0);
     this.streetLights.setEnabled(tier > 0);
+    this.cityBlock.setQualityTier(tier);
     this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0);
   }
 
@@ -1120,10 +1124,15 @@ export class GameManager {
         this.audio.gatePing(true);
         if (this.selection.source === 'demo') (this.music as unknown as { duck?: (a: number, s: number) => void }).duck?.(0.3, 0.4);
         else this.bufferPlayer?.duck(0.3, 0.4);
-        this.postfx.bloomPulse(0.55);
-        this.postfx.flash(0.16, new THREE.Color(0.5, 0.8, 1.2));
-        this.cam.addFovKick(3, 0.12);
-        this.cam.addTrauma(0.14);
+        // --- PERFECT juice: combo escalation (capped so chains stay readable) ---
+        const combo = this.scoring.combo;
+        const esc = Math.min(1, (combo - 1) / 24); // 0 at x1 → 1 at x25
+        const laneColor = LANE_COLORS[ev.note.lane] ?? LANE_COLORS[0];
+        this.postfx.bloomPulse(0.55 + esc * 0.35);
+        this.postfx.hitWash(0.85 + esc * 0.3, new THREE.Color(laneColor));
+        this.postfx.flash(0.16 + esc * 0.06, new THREE.Color(laneColor).multiplyScalar(0.55));
+        this.cam.addFovKick(3 + esc * 2.5, 0.12);
+        this.cam.addTrauma(0.14 + esc * 0.06);
         this.callbacks.onPopup?.(
           this.scoring.combo > 1 ? `PERFECT +${1000}` : 'PERFECT',
           Math.round(1000 * this.scoring.multiplier),
@@ -1403,6 +1412,7 @@ export class GameManager {
     this.traffic.update(dt, this.bike.s, this.bike.v);
     this.highway.update(this.bike.s, dt);
     this.highway.tick(this.time);
+    this.cityBlock.update(this.bike.s, dt);
     this.bike.updateVisuals(dt, this.time, this.cam.mode === 'cockpit');
 
     this.tmpFwd.set(Math.sin(this.bike.worldYaw), 0, Math.cos(this.bike.worldYaw));
@@ -1597,6 +1607,7 @@ export class GameManager {
   }
 
   dispose() {
+    this.cityBlock.dispose();
     cancelAnimationFrame(this.rafId);
     this.running = false;
     window.removeEventListener('resize', this.onResize);

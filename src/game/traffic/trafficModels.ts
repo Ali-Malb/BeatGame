@@ -78,7 +78,21 @@ export function buildTrafficVehicle(kind: VehicleKind, paintSeed: number): Vehic
   let height = 1.45;
   let heavy = false;
 
-  const paints = [new THREE.Color(0.78, 0.78, 0.8), new THREE.Color(0.08, 0.08, 0.1), new THREE.Color(0.72, 0.73, 0.75), new THREE.Color(0.55, 0.08, 0.1)];
+  // realistic road-mix paint palette — white/silver/black dominate real
+  // traffic, with a tail of muted colors so the pack never reads as 4 clones
+  const paints = [
+    new THREE.Color(0.82, 0.82, 0.84), // white
+    new THREE.Color(0.82, 0.82, 0.84),
+    new THREE.Color(0.08, 0.08, 0.1), // black
+    new THREE.Color(0.08, 0.08, 0.1),
+    new THREE.Color(0.72, 0.73, 0.75), // silver
+    new THREE.Color(0.72, 0.73, 0.75),
+    new THREE.Color(0.45, 0.47, 0.5), // gray
+    new THREE.Color(0.16, 0.22, 0.38), // dark blue
+    new THREE.Color(0.42, 0.08, 0.08), // dark red
+    new THREE.Color(0.2, 0.3, 0.2), // dark green
+    new THREE.Color(0.62, 0.56, 0.44), // beige
+  ];
   let paint = rng.pick(paints);
 
   if (kind === 'suv') {

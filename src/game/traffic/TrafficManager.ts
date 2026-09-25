@@ -150,7 +150,7 @@ export class TrafficManager {
         waveSlow: 1,
       });
     }
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 16; i++) {
       const g = buildOncomingCar();
       g.visible = false;
       scene.add(g);
