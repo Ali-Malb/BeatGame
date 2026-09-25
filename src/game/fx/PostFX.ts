@@ -41,8 +41,9 @@ const FinalShader = {
   `,
   fragmentShader: `
     uniform sampler2D tDiffuse;
-    uniform float uSpeedBlur, uRain, uTime, uSaturation, uContrast, uVignette, uFlash, uFade, uWindSpeed, uChroma, uChromaRed;
+    uniform float uSpeedBlur, uRain, uTime, uSaturation, uContrast, uVignette, uFlash, uFade, uWindSpeed, uChroma, uChromaRed, uHitWash;
     uniform vec3 uFlashColor;
+    uniform vec3 uHitColor;
     varying vec2 vUv;
 
     float hash21(vec2 p) {

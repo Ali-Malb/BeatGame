@@ -21,6 +21,7 @@
 import * as THREE from 'three';
 import { InputHandler } from './Input';
 import { Highway } from '../environment/Highway';
+import { CityBlock } from '../environment/CityBlock';
 import { WeatherController } from '../environment/Weather';
 import { BiomeController, BIOME_NAMES } from '../environment/Biomes';
 import { TrafficManager, NearMissEvent } from '../traffic/TrafficManager';
@@ -246,6 +247,7 @@ export class GameManager {
   private tmpFwd = new THREE.Vector3(0, 0, 1);
   private trafficLights: TrafficLights;
   private streetLights: StreetLights;
+  private cityBlock: CityBlock;
   private demoLyricCues: LyricCue[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private callbacks: GameCallbacks = {}) {
@@ -276,6 +278,7 @@ export class GameManager {
     this.traffic = new TrafficManager(this.highway, this.scene);
     this.trafficLights = new TrafficLights(this.scene);
     this.streetLights = new StreetLights(this.scene);
+    this.cityBlock = new CityBlock(this.scene, this.highway);
     this.bike = new BikeController(this.highway, this.scene);
     this.cam = new CameraController(this.scene, window.innerWidth / Math.max(1, window.innerHeight));
     this.cam.attachMirrors(this.bike);
@@ -577,6 +580,7 @@ export class GameManager {
     this.traffic.setQualityTier(tier);
     this.trafficLights.setEnabled(tier > 0);
     this.streetLights.setEnabled(tier > 0);
+    this.cityBlock.setQualityTier(tier);
     this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0);
   }
 
@@ -1408,6 +1412,7 @@ export class GameManager {
     this.traffic.update(dt, this.bike.s, this.bike.v);
     this.highway.update(this.bike.s, dt);
     this.highway.tick(this.time);
+    this.cityBlock.update(this.bike.s, dt);
     this.bike.updateVisuals(dt, this.time, this.cam.mode === 'cockpit');
 
     this.tmpFwd.set(Math.sin(this.bike.worldYaw), 0, Math.cos(this.bike.worldYaw));
@@ -1602,6 +1607,7 @@ export class GameManager {
   }
 
   dispose() {
+    this.cityBlock.dispose();
     cancelAnimationFrame(this.rafId);
     this.running = false;
     window.removeEventListener('resize', this.onResize);
