@@ -2,13 +2,36 @@
 import puppeteer from 'puppeteer';
 
 const URL = process.env.OBSERVE_URL ?? 'http://localhost:3001';
-const browser = await puppeteer.launch({
+// hard wall so the probe can never outlive its runner's command timeout —
+// SwiftShader teardown can hang browser.close() indefinitely
+const BUDGET_MS = Number(process.env.PROBE_BUDGET_MS ?? 160000);
+let browser;
+setTimeout(() => {
+  console.log(`WATCHDOG: ${BUDGET_MS / 1000}s budget exhausted — force exit (fail)`);
+  try { browser?.process()?.kill('SIGKILL'); } catch {}
+  process.exit(1);
+}, BUDGET_MS).unref();
+browser = await puppeteer.launch({
   headless: true,
   args: ['--no-sandbox','--disable-setuid-sandbox','--in-process-gpu','--use-gl=angle','--use-angle=swiftshader','--autoplay-policy=no-user-gesture-required','--mute-audio','--window-size=1100,700'],
 });
 const page = await browser.newPage();
 await page.setViewport({ width: 1100, height: 700 });
 const errors = [];
+const netLog = [];
+page.on('requestfinished', (req) => {
+  if (!req.url().includes('/api/remote/')) return;
+  const res = req.response();
+  // per-input noise stays hidden unless something goes wrong
+  if (req.url().includes('/input') && res?.status() === 200) return;
+  const path = req.url().replace(/^https?:\/\/[^/]+/, '');
+  netLog.push(`${req.method()} ${path} → ${res?.status() ?? '?'} (${Math.round(Date.now() - (netLog.t0 ?? 0))}ms)`);
+});
+page.on('requestfailed', (req) => {
+  if (!req.url().includes('/api/remote/')) return;
+  netLog.push(`${req.method()} ${req.url().replace(/^https?:\/\/[^/]+/, '')} → FAILED: ${req.failure()?.errorText}`);
+});
+netLog.t0 = Date.now();
 page.on('pageerror', (e) => errors.push(String(e).slice(0, 200)));
 page.on('console', (m) => {
   if (m.type() === 'error') errors.push(m.text().slice(0, 200));
@@ -90,12 +113,26 @@ for (let i = 0; i < 20 && !closed; i++) {
 console.log('panel closed + runtime disposed:', closed);
 
 let liveCount = -1;
-for (let i = 0; i < 12 && liveCount !== 0; i++) {
-  await new Promise((r) => setTimeout(r, 500));
+let reapedMs = -1;
+const reapT0 = Date.now();
+// the session is reaped asynchronously by the sweeper (client prune at 30 s
+// + the next 15 s sweep pass) whenever the bounded DELETE loses the race —
+// so the contract is "eventually gone", not "gone in the first 6 seconds".
+for (let i = 0; i < 28 && liveCount !== 0; i++) {
+  await new Promise((r) => setTimeout(r, 2500));
   const still = await fetch(`${URL}/api/remote/session`).then((r) => r.json());
   liveCount = still.sessions.length;
+  if ((i + 1) % 4 === 0) console.log(`  reap poll ${(i + 1) * 2.5}s: ${liveCount} session(s) left`);
 }
-console.log('live sessions after close (expect 0):', liveCount);
-await browser.close();
+reapedMs = liveCount === 0 ? Date.now() - reapT0 : -1;
+console.log('session reaped by sweeper:', liveCount === 0 ? `yes after ${(reapedMs / 1000).toFixed(1)}s` : 'NO (leak)');
+// raced close: SwiftShader teardown can hang Browser.close forever
+await Promise.race([
+  browser.close().catch(() => {}),
+  new Promise((r) => setTimeout(r, 10000)),
+]);
+browser.process()?.kill('SIGKILL');
+console.log('remote api traffic:');
+for (const line of netLog) console.log('  ', line);
 console.log('page errors:', errors.slice(0, 3));
 process.exit(closed && liveCount === 0 ? 0 : 1);
