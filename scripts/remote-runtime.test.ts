@@ -242,6 +242,20 @@ async function main() {
     check('idle sessions are reaped', reaped >= 1 && mgr.get(s2.id) === undefined, { reaped });
     mgr.destroyAll();
     check('manager cleanup leaves nothing behind', mgr.count === 0);
+
+    // vanished client: a client record that stopped talking must not pin its
+    // session forever (real-world leak: a closed tab leaves the record until
+    // the next sweep prunes it — then the abandoned session is reappable).
+    {
+      const s3 = await mgr.create({ chart: testChart() });
+      s3.connect('ghost-client');
+      check('ghost client is attached', s3.clientList().length === 1);
+      const ghostReaped = mgr.sweep(Date.now() + 10 * 60 * 1000, 1000);
+      check('vanished client is pruned and its session reaped', ghostReaped >= 1 && mgr.get(s3.id) === undefined, {
+        reaped: ghostReaped,
+      });
+      mgr.destroyAll();
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

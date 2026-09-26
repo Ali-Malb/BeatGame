@@ -52,6 +52,12 @@ export interface RemoteStartOptions extends StartOptions {
 
 const INPUT_HZ = 30;
 const HEARTBEAT_MS = 2000;
+/** bounded teardown: dispose must resolve even when the server is busy */
+const TEARDOWN_TIMEOUT_MS = 3000;
+
+/** reconnect with capped exponential backoff — never gives up while the UI lives */
+const BACKOFF_BASE_MS = 800;
+const BACKOFF_MAX_MS = 8000;
 
 export class RemoteRuntime implements GameRuntime {
   readonly kind: RuntimeKind = 'remote';
@@ -73,6 +79,9 @@ export class RemoteRuntime implements GameRuntime {
   private inputSeq = 0;
   private inputTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** backpressure: a slow server must not build a browser-side request queue */
+  private inputInFlight = false;
+  private heartbeatInFlight = false;
   private eventSource: EventSource | null = null;
   private frameTimes: number[] = [];
   private disposed = false;
@@ -80,6 +89,7 @@ export class RemoteRuntime implements GameRuntime {
   private dataChannel: RTCDataChannel | null = null;
   private snapshotWatchdog: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(baseUrl = '') {
     this.baseUrl = baseUrl;
@@ -174,35 +184,48 @@ export class RemoteRuntime implements GameRuntime {
     this.heartbeatTimer = setInterval(() => void this.heartbeat(), HEARTBEAT_MS);
   }
 
+  /**
+   * One input POST in flight at a time. A software-rendered server can drain
+   * requests far slower than INPUT_HZ; without backpressure the browser queues
+   * hundreds of POSTs and saturates its per-origin socket pool — which then
+   * starves unrelated requests like the teardown DELETE (they abort while
+   * still queued and the session lingers until the server sweeper reaps it).
+   */
   private async pushInput(): Promise<void> {
-    if (!this.sessionId || this.disposed) return;
-    const payload = serializeInput(this.input, ++this.inputSeq, Date.now());
-    // once a WebRTC data channel is up the input rides it (lower latency)
-    if (this.dataChannel && this.dataChannel.readyState === 'open') {
-      try {
-        this.dataChannel.send(payload);
-        return;
-      } catch {
-        this.dataChannel = null;
-      }
-    }
+    if (!this.sessionId || this.disposed || this.inputInFlight) return;
+    this.inputInFlight = true;
     try {
-      const res = await fetch(`${this.baseUrl}/api/remote/session/${this.sessionId}/input`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'input', clientId: this.clientId, state: payload }),
-      });
-      if (res.ok) {
-        const json = (await res.json()) as { ack?: { serverTime: number; clientTime: number } };
-        if (json.ack) this.latencyMs = Math.max(0, json.ack.serverTime - json.ack.clientTime);
+      const payload = serializeInput(this.input, ++this.inputSeq, Date.now());
+      // once a WebRTC data channel is up the input rides it (lower latency)
+      if (this.dataChannel && this.dataChannel.readyState === 'open') {
+        try {
+          this.dataChannel.send(payload);
+          return;
+        } catch {
+          this.dataChannel = null;
+        }
       }
-    } catch {
-      this.noteTransportTrouble('input transport failed');
+      try {
+        const res = await fetch(`${this.baseUrl}/api/remote/session/${this.sessionId}/input`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'input', clientId: this.clientId, state: payload }),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as { ack?: { serverTime: number; clientTime: number } };
+          if (json.ack) this.latencyMs = Math.max(0, json.ack.serverTime - json.ack.clientTime);
+        }
+      } catch {
+        this.noteTransportTrouble('input transport failed');
+      }
+    } finally {
+      this.inputInFlight = false;
     }
   }
 
   private async heartbeat(): Promise<void> {
-    if (!this.sessionId || this.disposed) return;
+    if (!this.sessionId || this.disposed || this.heartbeatInFlight) return;
+    this.heartbeatInFlight = true;
     try {
       const res = await fetch(`${this.baseUrl}/api/remote/session/${this.sessionId}`, {
         method: 'POST',
@@ -212,12 +235,18 @@ export class RemoteRuntime implements GameRuntime {
       if (!res.ok) this.noteTransportTrouble(`heartbeat failed (${res.status})`);
     } catch {
       this.noteTransportTrouble('heartbeat transport failed');
+    } finally {
+      this.heartbeatInFlight = false;
     }
   }
 
-  /** reconnect awareness: a dropped snapshot stream restarts automatically */
+  /** reconnect awareness: a dropped snapshot stream restarts with backoff */
   private openStream(): void {
-    if (!this.sessionId) return;
+    if (!this.sessionId || this.disposed) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.eventSource?.close();
     const es = new EventSource(`${this.baseUrl}/api/remote/session/${this.sessionId}/stream`);
     this.eventSource = es;
@@ -234,6 +263,11 @@ export class RemoteRuntime implements GameRuntime {
     es.addEventListener('hello', (ev) => this.onSnapshotEvent((ev as MessageEvent).data));
     es.addEventListener('snapshot', (ev) => {
       this.reconnectAttempts = 0;
+      if (this.snapshotWatchdog) {
+        clearTimeout(this.snapshotWatchdog);
+        this.snapshotWatchdog = null;
+      }
+      // re-arm AFTER each frame instead of stacking a fresh 5 s timer per event
       armWatchdog();
       this.onSnapshotEvent((ev as MessageEvent).data);
     });
@@ -243,8 +277,16 @@ export class RemoteRuntime implements GameRuntime {
     });
     es.onerror = () => {
       if (this.disposed) return;
-      this.connected = this.eventSource?.readyState === EventSource.OPEN;
+      es.close();
+      this.connected = false;
       this.emitStatus();
+      // EventSource auto-retries immediately on same-page errors; gate it through
+      // our own backoff so a dead session doesn't hammer the server
+      const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(this.reconnectAttempts, 4));
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.disposed && this.sessionId) this.openStream();
+      }, delay);
     };
   }
 
@@ -381,6 +423,7 @@ export class RemoteRuntime implements GameRuntime {
     this.eventSource?.close();
     this.eventSource = null;
     if (this.snapshotWatchdog) clearTimeout(this.snapshotWatchdog);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.inputTimer) clearInterval(this.inputTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.dataChannel?.close();
@@ -393,15 +436,45 @@ export class RemoteRuntime implements GameRuntime {
     this.input = { ...NEUTRAL_INPUT };
   }
 
-  private async teardownSession(): Promise<void> {
-    if (!this.sessionId) return;
+  /**
+ * Ask the server to destroy the session. Bounded: a saturated software
+ * renderer can hold the server loop for many seconds, and the panel close
+ * path awaits this — so it must always resolve promptly.
+ *
+ * If the first DELETE cannot be delivered (aborted by the teardown bound),
+ * one detached retry follows: ~9 s after the last client contact the session's
+ * heartbeat timeout has paused the simulation, the render/encode loop goes
+ * idle, and the retry almost always destroys the session immediately. The
+ * server's idle sweeper remains the final backstop for genuinely lost
+ * requests (no client records survive pruneStaleClients).
+ */
+private teardownSession(): Promise<void> {
+    if (!this.sessionId) return Promise.resolve();
     const id = this.sessionId;
     this.sessionId = null;
     this.connected = false;
-    try {
-      await fetch(`${this.baseUrl}/api/remote/session/${id}`, { method: 'DELETE' });
-    } catch {
-      /* server already reaped it */
-    }
+    const attempt = async (timeoutMs: number): Promise<boolean> => {
+      try {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+        try {
+          const res = await fetch(`${this.baseUrl}/api/remote/session/${id}`, {
+            method: 'DELETE',
+            signal: ctrl?.signal,
+          });
+          return res.ok;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      } catch {
+        return false;
+      }
+    };
+    return attempt(TEARDOWN_TIMEOUT_MS).then((ok) => {
+      if (ok) return;
+      // detached single retry — never blocks dispose(); harmless if the first
+      // attempt already succeeded (destroy() of a dead id is a no-op)
+      void new Promise((r) => setTimeout(r, 9000)).then(() => attempt(TEARDOWN_TIMEOUT_MS));
+    });
   }
 }

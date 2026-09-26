@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
+import type { GameManager } from '@/game/core/Game';
 import { InputHandler } from '@/game/core/Input';
 import { RemoteRuntime, type RemoteStartOptions } from '@/game/runtime/RemoteRuntime';
 import type { RuntimeCapabilities, RuntimeStatus, SimSnapshot } from '@/game/runtime/types';
@@ -37,8 +38,11 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [phase, setPhase] = useState<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed'>('idle');
+  const statusListenersRef = useRef<(() => void)[]>([]);
+  const stoppingRef = useRef(false);
 
-  // capability readout before any session exists (client side + server probe)
+  // capability probe before any session exists (client side + server probe)
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -58,6 +62,21 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
       alive = false;
     };
   }, []);
+
+  // remote mode owns the client surface: the local 3D world stops rendering so
+  // the player's GPU/CPU cost actually drops to the video decode (Phase 9/15)
+  const localGame = typeof window !== 'undefined' ? (window as unknown as { __game?: GameManager }).__game ?? null : null;
+  useEffect(() => {
+    if (!localGame) return;
+    if (videoUrl) localGame.suspendAttract();
+    else if (localGame.getState() === 'menu') localGame.resumeAttract();
+  }, [videoUrl, localGame]);
+  useEffect(() => {
+    return () => {
+      // panel unmount (close/stop) always gives the surface back
+      if (localGame && localGame.getState() === 'menu') localGame.resumeAttract();
+    };
+  }, [localGame]);
 
   // input forward loop: local devices → normalized InputState → server
   useEffect(() => {
@@ -98,12 +117,17 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
         videoHeight: 180,
       });
       setVideoUrl(runtime.videoUrl());
-      const offStatus = runtime.onStatus((s) => setStatus(s));
+      const offStatus = runtime.onStatus((s) => {
+        setStatus(s);
+        if (!s.connected && (s.state === 'playing' || s.state === 'countdown')) setPhase('reconnecting');
+        else if (s.connected) setPhase('connected');
+        else if (s.state === 'error') setPhase('failed');
+      });
       const offSnap = runtime.onSnapshot((s) => setSnapshot(s));
+      statusListenersRef.current = [offStatus, offSnap];
       runtimeRef.current = runtime;
       setStatus(runtime.status());
-      void offStatus;
-      void offSnap;
+      setPhase('connected');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus(runtime.status());
@@ -113,11 +137,26 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
   };
 
   const stop = async () => {
-    await runtimeRef.current?.dispose();
-    runtimeRef.current = null;
-    setVideoUrl(null);
-    setSnapshot(null);
-    onClose();
+    if (stoppingRef.current) return; // double-close guard
+    stoppingRef.current = true;
+    if (process.env.NODE_ENV === 'development') console.log('[remote] dispose started');
+    try {
+      for (const off of statusListenersRef.current) off();
+      statusListenersRef.current = [];
+      await runtimeRef.current?.dispose();
+      if (process.env.NODE_ENV === 'development') console.log('[remote] dispose done');
+    } catch (err) {
+      console.error('[remote] dispose failed:', err);
+    } finally {
+      runtimeRef.current = null;
+      setVideoUrl(null);
+      setSnapshot(null);
+      setPhase('idle');
+      if (process.env.NODE_ENV === 'development') {
+        (window as unknown as { __remoteDisposed?: boolean }).__remoteDisposed = true;
+      }
+      onClose();
+    }
   };
 
   useEffect(() => {
@@ -133,9 +172,24 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
           <div className="flex items-center gap-2 font-ui text-[11px] font-semibold tracking-[0.35em] text-cyan-200/80">
             <Server className="h-4 w-4" /> REMOTE RENDER — SERVER-SIDE SIMULATION
           </div>
-          <button onClick={() => void stop()} className="text-white/40 transition hover:text-white" aria-label="close">
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            {videoUrl && (
+              <span
+                className={`rounded-full px-2.5 py-0.5 font-ui text-[10px] font-bold tracking-widest ${
+                  phase === 'connected'
+                    ? 'bg-emerald-400/15 text-emerald-300'
+                    : phase === 'reconnecting'
+                      ? 'bg-amber-400/15 text-amber-300'
+                      : 'bg-white/10 text-white/60'
+                }`}
+              >
+                {phase === 'connected' ? '● CONNECTED' : phase === 'reconnecting' ? '● RECONNECTING' : `● ${phase.toUpperCase()}`}
+              </span>
+            )}
+            <button onClick={() => void stop()} className="text-white/40 transition hover:text-white" aria-label="close">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         {!videoUrl && (

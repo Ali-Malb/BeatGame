@@ -27,6 +27,8 @@ export const TICK_HZ = 60;
 export const DEFAULT_TIMEOUT_MS = 8000;
 /** abandoned (zero clients) sessions are reaped after this */
 export const IDLE_REAP_MS = 90_000;
+/** a client record older than this is pruned by sweep — a vanished client must not pin its session */
+export const CLIENT_STALE_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 4000;
 
 export interface CreateSessionOptions {
@@ -438,6 +440,18 @@ export class RemoteSession {
 
   // ---------------------------------------------------------------------- teardown ----
 
+  /** prune client records that stopped talking (input/heartbeat/stream) — their session is then reappable */
+  pruneStaleClients(now = Date.now(), staleAfterMs = CLIENT_STALE_MS): number {
+    let pruned = 0;
+    for (const [clientId, c] of this.clients) {
+      if (now - c.lastSeen > staleAfterMs) {
+        this.clients.delete(clientId);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -540,7 +554,9 @@ export class SessionManager {
   sweep(now = Date.now(), reapAfterMs = IDLE_REAP_MS): number {
     let reaped = 0;
     for (const [id, s] of this.sessions) {
-      const idle = now - Math.max(s.heartbeatAt, s.createdAt);
+      s.pruneStaleClients(now);
+      const live = Math.max(s.heartbeatAt, s.createdAt);
+      const idle = now - live;
       if (s.destroyedFlag || (s.clientList().length === 0 && idle > reapAfterMs)) {
         s.destroy();
         this.sessions.delete(id);
