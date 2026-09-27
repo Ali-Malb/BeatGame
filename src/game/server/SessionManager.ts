@@ -388,15 +388,22 @@ export class RemoteSession {
    * Adaptation: keep the frame pipeline inside its budget by trading pixels for
    * frames. Driven by measured encode cost and client count, never by guessing.
    */
+  /**
+   * Adaptation: keep the frame pipeline inside its budget by trading pixels for
+   * frames. Driven by measured encode cost and client count, never by guessing.
+   * Windows are evaluated every 3 s (was 2 s) so a single slow encode spike
+   * cannot yank quality down and back; the upshift floor targets a calmer
+   * equilibrium that leaves headroom for the Next.js process on small hosts.
+   */
   private adapt(now: number): void {
-    if (now - this.adaptTimer < 2000) return;
+    if (now - this.adaptTimer < 3000) return;
     this.adaptTimer = now;
     const cost = this.encodeMs + this.renderMs;
     if (cost > 34) {
       this.jpegQuality = Math.max(48, this.jpegQuality - 6);
       if (this.videoFps > 12) this.videoFps -= 3;
       else if (this.renderer.width > 384) this.renderer.resize(Math.round(this.renderer.width * 0.8), Math.round(this.renderer.height * 0.8));
-    } else if (cost < 14) {
+    } else if (cost < 12) {
       this.jpegQuality = Math.min(84, this.jpegQuality + 4);
       if (this.videoFps < 30) this.videoFps += 2;
     }

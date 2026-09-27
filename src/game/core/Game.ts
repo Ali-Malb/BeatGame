@@ -156,9 +156,18 @@ const PHYSICS_H = 1 / 120;
 const MAX_STEPS_PER_FRAME = 600; // 5 s @ 1/120 h
 /** 3-2-1-GO: 2 bars @128 BPM — the demo synth's bar grid lands exactly on song t=0 */
 const COUNTDOWN_SEC = 3.75;
+/** Hard cap on the drawing-buffer pixel ratio. Full retina rendering buys
+ *  almost nothing on a moving road scene and doubles GPU fill cost, which is
+ *  the single largest power/heat/battery item on portable devices. */
+const MAX_PIXEL_RATIO = 1.6;
+/** The composer renders into an off-screen target; scaling it below the canvas
+ *  size keeps bloom/final passes cheap while the canvas stretch also acts as a
+ *  free anti-alias filter. Applied per quality tier (0 low / 1 medium / 2 high). */
+const COMPOSER_TARGET_SCALE: [number, number, number] = [0.7, 0.85, 1.0];
 
-/** section-kind → biome order for song mode (cycled per section) */
 const SECTION_BIOME_CYCLE: Array<0 | 1 | 2 | 3> = [0, 2, 1, 3];
+/** attract-mode render cap (see throttleAttract) */
+const ATTRACT_FPS = 30;
 
 export class GameManager {
   private renderer: THREE.WebGLRenderer;
@@ -260,7 +269,7 @@ export class GameManager {
       powerPreference: 'high-performance',
       stencil: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
@@ -549,8 +558,8 @@ export class GameManager {
     const pixelRatio = low
       ? (this.softwareRenderer ? 0.68 : 0.75)
       : tier === 1
-        ? 1
-        : Math.min(window.devicePixelRatio || 1, 1.6);
+        ? Math.min(window.devicePixelRatio || 1, 1)
+        : Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(w, h, false);
     this.renderer.shadowMap.enabled = tier === 2;
@@ -581,7 +590,7 @@ export class GameManager {
     this.trafficLights.setEnabled(tier > 0);
     this.streetLights.setEnabled(tier > 0);
     this.cityBlock.setQualityTier(tier);
-    this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0);
+    this.postfx.rebuild(this.renderer, w, h, tier === 2 ? 2 : 0, COMPOSER_TARGET_SCALE[tier]);
   }
 
   /** route volume changes into the live audio graph (real gains, §30) */
@@ -967,6 +976,30 @@ export class GameManager {
     this.rafId = requestAnimationFrame(this.loop);
   }
 
+  /** True while no run is active (menu / search / load screens). The attract
+   *  loop still renders the world, but nothing here is gameplay-sensitive. */
+  private get menuIdle(): boolean {
+    return this.state === 'menu' || this.state === 'search' || this.state === 'loading' || this.state === 'analyzing';
+  }
+
+  /** Frame-rate governor for non-gameplay states: 30 fps is plenty behind the
+   *  menu overlays, and capping it cuts GPU/CPU load (and battery) by up to
+   *  half while the game sits in the lobby. Gameplay states run uncapped —
+   *  the rhythm timeline reads raw rAF timestamps, so throttling there would
+   *  only degrade the physics catch-up budget. */
+  private throttleAttract(): boolean {
+    if (!this.menuIdle) return false;
+    const now = performance.now();
+    if (now - this.lastAttractFrame < 1000 / ATTRACT_FPS - 1) {
+      this.rafId = requestAnimationFrame(this.loop);
+      return true;
+    }
+    this.lastAttractFrame = now;
+    return false;
+  }
+
+  private lastAttractFrame = 0;
+
   /**
    * Remote play: hand the whole client over to the streamed session. The local
    * GameManager keeps ZERO GPU/CPU load while a remote video is showing — the
@@ -1210,6 +1243,7 @@ export class GameManager {
   };
 
   private loop = (t: number) => {
+    if (this.throttleAttract()) return; // idle cap re-arms rAF itself
     this.rafId = requestAnimationFrame(this.loop);
     const rawDt = (t - this.lastT) / 1000;
     this.lastT = t;

@@ -110,9 +110,11 @@ export default function RemoteSessionPanel({ onClose, beatmap, onBlockGameInput 
       await runtime.start({
         song: { source: 'demo', id: 'demo', title: 'MIDNIGHT RUNNER — C1 Inner Loop' },
         chart: beatmap,
-        // The CPU renderer is intentionally conservative: 320×180 gives the
-        // browser a real first frame quickly on a server without a GPU, then
-        // the session adapts quality from measured render/encode cost.
+        // The CPU renderer is intentionally conservative: 320×180 keeps the
+        // per-frame render+encode cost low enough that GPU-less hosts sustain
+        // a usable stream fps, then the session adapts quality from measured
+        // cost. (The API default for sessions that don't pass a size is a
+        // lighter 576×324, down from 640×360.)
         videoWidth: 320,
         videoHeight: 180,
       });

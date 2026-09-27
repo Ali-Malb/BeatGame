@@ -209,6 +209,11 @@ export class BikeController {
     if (this.brakeLight) {
       this.brakeLight.intensity = brake > 0.08 ? 15 * brake : 0;
     }
+    // exhaust heat glow: barely visible at idle, bright orange up near the
+    // limiter — a free accent (one basic mesh, no extra light) that also
+    // anchors speed perception for chase cameras at night
+    const heat = clamp((m.rpm - 6500) / 8700, 0, 1);
+    this.joints.exhaustGlowMat.color.setRGB(0.16 + heat * 2.6, 0.06 + heat * 0.75, 0.015 + heat * 0.1);
     const hb = this.hbYaw;
     const cy = Math.cos(hb);
     const sy = Math.sin(hb);

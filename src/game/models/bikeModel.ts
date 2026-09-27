@@ -23,6 +23,8 @@ export interface BikeJoints {
   taillightMat: THREE.MeshBasicMaterial;
   headlightSpot: THREE.SpotLight;
   exhaustMat: THREE.MeshStandardMaterial;
+  /** exhaust tip glow — BikeController drives its intensity from RPM */
+  exhaustGlowMat: THREE.MeshBasicMaterial;
 }
 
 function mat(color: number, rough = 0.5, metal = 0.35): THREE.MeshStandardMaterial {
@@ -216,6 +218,12 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
   exhaust.rotation.x = Math.PI / 2 + 0.12;
   const exhaustTip = addMesh(body, new THREE.CylinderGeometry(0.062, 0.055, 0.06, 14), mat(0x0a0a0c, 0.4, 0.8), 0.12, 0.31, -0.74);
   exhaustTip.rotation.x = Math.PI / 2 + 0.12;
+  // short luminous collar just behind the tip — emissive scale with RPM reads
+  // as exhaust heat and gives chase cameras a warm accent in the dark
+  const exhaustGlowMat = new THREE.MeshBasicMaterial({ color: 0x3a1c08 });
+  const exhaustGlow = addMesh(body, new THREE.CylinderGeometry(0.045, 0.05, 0.1, 12), exhaustGlowMat, 0.12, 0.335, -0.66);
+  exhaustGlow.rotation.x = Math.PI / 2 + 0.12;
+  exhaustGlow.castShadow = false;
 
   // ---- tail section ----
   const tail = addMesh(body, new THREE.BoxGeometry(0.24, 0.14, 0.55), paint, 0, 0.84, -0.62);
@@ -278,6 +286,7 @@ export function buildBike(): { group: THREE.Group; joints: BikeJoints } {
     taillightMat,
     headlightSpot,
     exhaustMat,
+    exhaustGlowMat,
   };
   return { group, joints };
 }

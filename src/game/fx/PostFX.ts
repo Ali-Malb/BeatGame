@@ -212,8 +212,14 @@ export class PostFX {
     this.outputPass.enabled = !this.directRender;
   }
 
-  /** rebuild render targets at a new resolution / MSAA level (adaptive quality) */
-  rebuild(renderer: THREE.WebGLRenderer, cssW: number, cssH: number, samples: number) {
+  /**
+   * rebuild render targets at a new resolution / MSAA level (adaptive quality).
+   * `targetScale` (0..1] sizes the off-screen composer buffer relative to the
+   * canvas — bloom and the final pass are resolution-bound, so a slightly
+   * smaller target is the cheapest big win on the GPU side; the upscale back
+   * to the canvas doubles as a soft anti-alias filter.
+   */
+  rebuild(renderer: THREE.WebGLRenderer, cssW: number, cssH: number, samples: number, targetScale = 1) {
     // The low tier renders directly to the canvas.  Keep the dormant composer
     // sized for a later upgrade, but do not allocate MSAA targets on the hot
     // path while it is unused.
@@ -222,11 +228,16 @@ export class PostFX {
       this.composer.setSize(cssW, cssH);
       return;
     }
-    const pr = renderer.getPixelRatio();
+    const pr = renderer.getPixelRatio() * Math.min(1, Math.max(0.4, targetScale));
     const old = this.composer;
     this.composer = this.buildComposer(renderer, Math.floor(cssW * pr), Math.floor(cssH * pr), samples);
+    // setSize below re-sizes the composer's internal targets by css × pr, but
+    // the render pass must still know the true output size for correct blit:
+    // EffectComposer multiplies its pixelRatio by the CSS size, so report the
+    // scaled ratio here and pass the CSS size unchanged.
     this.composer.setPixelRatio(pr);
     this.composer.setSize(cssW, cssH);
+    this.bloom.setSize(Math.max(2, Math.floor(cssW * pr / 2)), Math.max(2, Math.floor(cssH * pr / 2)));
     old.dispose();
   }
 

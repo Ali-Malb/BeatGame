@@ -33,7 +33,10 @@ export interface Surface {
 
 /** detail buckets that vanish first at distance */
 const DETAIL_SKIP_FAR = new Set(['paint', 'paintEdge', 'reflector', 'reflectorHead', 'lampPool', 'lampCone']);
+/** base triangle budget, scaled down proportionally for small panel sizes so
+ *  the CPU raster cost per frame stays flat across resolutions */
 const DEFAULT_BUDGET = 24000;
+const BUDGET_REFERENCE_PIXELS = 640 * 360;
 const NEAR = 0.35;
 
 export class SoftwareRenderer {
@@ -157,7 +160,10 @@ export class SoftwareRenderer {
   /** render one frame of the live sim; returns RGBA pixels */
   render(sim: AuthoritativeSim, budget = DEFAULT_BUDGET): Uint8Array {
     const t0 = performance.now();
-    this.budget = budget;
+    // keep per-frame CPU cost flat as the panel resizes: scale the tri budget
+    // with the framebuffer area (clamped so tiny sizes stay readable)
+    const scale = (this.width * this.height) / BUDGET_REFERENCE_PIXELS;
+    this.budget = Math.max(6000, Math.round(budget * Math.min(1, Math.max(0.25, scale))));
     this.triCount = 0;
     let meshes = 0;
 
@@ -171,6 +177,12 @@ export class SoftwareRenderer {
     const fog = scene.fog as THREE.FogExp2 | null;
     const fogColor = fog ? fog.color : _defaultFog;
     const fogDensity = fog ? fog.density : 0.0025;
+    // ambient/lighting follow the active weather preset so the server frame
+    // reads like the client at night/rain (dark deck, hot emissives) —
+    // previously a fixed sky-blue ambient flattened every preset together
+    const preset = sim.weatherPreset;
+    const tint = PRESET_LIGHT[preset] ?? PRESET_LIGHT[0];
+    const ambient = tint.ambient;
 
     this.drawSky(sim, cam, focal);
     this.zbuf.fill(Infinity);
@@ -194,11 +206,11 @@ export class SoftwareRenderer {
         }
         const dist = this.meshDistance(mesh, cam);
         if (dist > 420 && DETAIL_SKIP_FAR.has(mesh.name)) return;
-        this.rasterMesh(mesh, surface, focal, fogColor, fogDensity, false);
+        this.rasterMesh(mesh, surface, focal, fogColor, fogDensity, false, ambient);
       });
     }
     for (const item of emissiveQueue) {
-      this.rasterMesh(item.mesh, item.surface, focal, fogColor, fogDensity, true);
+      this.rasterMesh(item.mesh, item.surface, focal, fogColor, fogDensity, true, ambient);
     }
 
     this.lastStats = { tris: this.triCount, meshes, ms: +(performance.now() - t0).toFixed(2) };
@@ -264,7 +276,8 @@ export class SoftwareRenderer {
     focal: number,
     fogColor: THREE.Color,
     fogDensity: number,
-    glowPass: boolean
+    glowPass: boolean,
+    ambient: { kr: number; kg: number; kb: number }
   ): void {
     const geo = mesh.geometry as THREE.BufferGeometry;
     const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -320,7 +333,7 @@ export class SoftwareRenderer {
           focal
         );
         for (let k = 0; k < clipped.length; k += 3) {
-          this.fillTri(clipped[k], clipped[k + 1], clipped[k + 2], surface, lambert, fogColor, fogDensity, glowPass);
+          this.fillTri(clipped[k], clipped[k + 1], clipped[k + 2], surface, lambert, fogColor, fogDensity, glowPass, ambient);
           this.triCount++;
         }
         continue;
@@ -335,7 +348,8 @@ export class SoftwareRenderer {
         lambert,
         fogColor,
         fogDensity,
-        glowPass
+        glowPass,
+        ambient
       );
       this.triCount++;
     }
@@ -378,7 +392,8 @@ export class SoftwareRenderer {
     lambert: number,
     fogColor: THREE.Color,
     fogDensity: number,
-    glowPass: boolean
+    glowPass: boolean,
+    ambient: { kr: number; kg: number; kb: number }
   ): void {
     const W = this.width;
     const H = this.height;
@@ -390,6 +405,9 @@ export class SoftwareRenderer {
     const area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
     if (Math.abs(area) < 0.6) return;
     const inv = 1 / area;
+    // fog measured in CAMERA space (a[2] = view depth) instead of screen z:
+    // distance grows with true distance from the eye, matching the client's
+    // FogExp2 and removing the flat-z fog bands visible on slopes
     const fogK = 1 - Math.exp(-fogDensity * fogDensity * a[2] * a[2]);
 
     let kr: number;
@@ -402,9 +420,9 @@ export class SoftwareRenderer {
     } else {
       const k = 0.42 + 0.75 * lambert;
       const keep = 1 - fogK;
-      kr = clamp255((surface.r * k * keep + fogColor.r * fogK) * 255);
-      kg = clamp255((surface.g * k * keep + fogColor.g * fogK) * 255);
-      kb = clamp255((surface.b * k * keep + fogColor.b * fogK) * 255);
+      kr = clamp255((surface.r * k * ambient.kr * keep + fogColor.r * fogK) * 255);
+      kg = clamp255((surface.g * k * ambient.kg * keep + fogColor.g * fogK) * 255);
+      kb = clamp255((surface.b * k * ambient.kb * keep + fogColor.b * fogK) * 255);
     }
     const glow = surface.glow;
 
@@ -442,6 +460,15 @@ export class SoftwareRenderer {
 const _up = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _defaultFog = new THREE.Color(0x0a0d14);
+
+/** per-weather-preset lighting the CPU rasterizer applies to lit surfaces.
+ *  Mirrors the four client WeatherParams presets (ambient level + sun tint). */
+const PRESET_LIGHT: Array<{ ambient: { kr: number; kg: number; kb: number } }> = [
+  { ambient: { kr: 0.94, kg: 0.82, kb: 0.96 } }, // deep twilight
+  { ambient: { kr: 0.5, kg: 0.58, kb: 0.8 } }, // starry night
+  { ambient: { kr: 1.18, kg: 1.0, kb: 0.8 } }, // fiery golden hour
+  { ambient: { kr: 0.62, kg: 0.68, kb: 0.82 } }, // wet rainy night
+];
 
 function mix3(a: number[], b: number[], t: number): number[] {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
