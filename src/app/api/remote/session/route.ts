@@ -19,8 +19,12 @@ export async function POST(req: Request) {
     chart: (body.chart ?? null) as never,
     countdownSec: typeof body.countdownSec === 'number' ? body.countdownSec : 3,
     music: (body.music ?? null) as never,
-    videoWidth: typeof body.videoWidth === 'number' ? Math.max(240, Math.min(1920, body.videoWidth)) : 640,
-    videoHeight: typeof body.videoHeight === 'number' ? Math.max(135, Math.min(1080, body.videoHeight)) : 360,
+    // 576×324 is the lightweight default for the software rasterizer: sharper
+    // than the old 640×360 default at ~19% fewer pixels to rasterize AND a
+    // cheaper JPEG encode, while the client's adapt() still scales it further
+    // on measured cost. Clients that need something else pass explicit sizes.
+    videoWidth: typeof body.videoWidth === 'number' ? Math.max(240, Math.min(1920, body.videoWidth)) : 576,
+    videoHeight: typeof body.videoHeight === 'number' ? Math.max(135, Math.min(1080, body.videoHeight)) : 324,
     startLane: typeof body.startLane === 'number' ? body.startLane : 2,
     startSpeed: typeof body.startSpeed === 'number' ? body.startSpeed : undefined,
   });

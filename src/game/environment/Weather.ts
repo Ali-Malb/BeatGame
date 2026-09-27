@@ -200,6 +200,8 @@ export class WeatherController {
   private sun: THREE.DirectionalLight;
   private ambient: THREE.AmbientLight;
   private hemi: THREE.HemisphereLight;
+  /** shadowless opposing fill: keeps shadowed faces readable at dusk/night */
+  private fill: THREE.DirectionalLight;
   private sunGlare: THREE.Sprite;
 
   // particles
@@ -294,6 +296,11 @@ export class WeatherController {
           col = mix(col, cloudTint, cloudMask * band * 0.22);
           // horizon haze lift
           col += horizon * 0.12 * (1.0 - smoothstep(0.0, 0.14, abs(h)));
+          // deep-sky falloff keeps the zenith from washing out over the
+          // horizon gradient (better perceived contrast at dusk/night)
+          col *= 1.0 - 0.18 * smoothstep(0.5, 1.0, h);
+          // stable per-direction dithering kills gradient banding on 8-bit output
+          col += (hash(d * 137.0) - 0.5) * 0.006;
           gl_FragColor = vec4(col, 1.0);
         }
       `,
@@ -326,6 +333,12 @@ export class WeatherController {
     // horizon (N·L ≈ 0 for a flat deck)
     this.hemi = new THREE.HemisphereLight(0xffffff, 0x101014, 0.35);
     scene.add(this.hemi);
+    // shadowless fill from the opposite side of the key light: models sun
+    // bounce off the deck/city so sun-facing shadows are not pure black
+    this.fill = new THREE.DirectionalLight(0xffffff, 0.3);
+    this.fill.castShadow = false;
+    scene.add(this.fill);
+    scene.add(this.fill.target);
 
     this.pmrem = new THREE.PMREMGenerator(renderer);
 
@@ -593,6 +606,10 @@ export class WeatherController {
     this.sun.position.set(playerPos.x + sd.x * 180, playerPos.y + sd.y * 180, playerPos.z + sd.z * 180);
     this.sun.target.position.copy(playerPos);
     this.sun.target.updateMatrixWorld();
+    // fill sits opposite the key light, raised so it reads as deck bounce
+    this.fill.position.set(playerPos.x - sd.x * 120, playerPos.y + 60, playerPos.z - sd.z * 120);
+    this.fill.target.position.copy(playerPos);
+    this.fill.target.updateMatrixWorld();
     this.sunGlare.position.set(playerPos.x + sd.x * 2300, playerPos.y + sd.y * 2300, playerPos.z + sd.z * 2300);
     (this.sunGlare.material as THREE.SpriteMaterial).opacity = clamp(this.current.glare, 0, 1);
     (this.sunGlare.material as THREE.SpriteMaterial).color.copy(this.current.sunColor);
@@ -800,8 +817,13 @@ export class WeatherController {
     const sunElev = clamp(c.sunDir.y, 0, 1);
     const grazingFloor = (1 - clamp(sunElev / 0.3, 0, 1)) * 0.5;
     this.sun.intensity = c.sunLightIntensity + grazingFloor;
-    this.ambient.color.copy(c.ambientColor);
-    this.ambient.intensity = c.ambientIntensity;
+    // ambient warms/cools toward the key light at low sun elevation so shadow
+    // interiors pick up a plausible bounce tint instead of flat grey
+    const warm = 1 - clamp(sunElev / 0.35, 0, 1);
+    this.ambient.color.copy(c.ambientColor).lerp(c.sunLightColor, warm * 0.3);
+    this.ambient.intensity = c.ambientIntensity * (1 - warm * 0.1);
+    this.fill.color.copy(c.sunLightColor);
+    this.fill.intensity = 0.26 + warm * 0.24;
     // hemisphere sky/ground bounce tracks the ambient, scaled by sun height
     // (deep night leans on lamp pools + headlight instead of fake moonlight)
     this.hemi.color.copy(c.zenith).multiplyScalar(1.6);
@@ -819,6 +841,11 @@ export class WeatherController {
     );
     for (const w of this.mats.windows) w.emissiveIntensity = c.windowEmissive;
     this.mats.sign.emissiveIntensity = c.signEmissive;
+    // lane paint catches streetlight at night (retro-reflective feel) while
+    // staying inert in daylight presets
+    const paintGlow = clamp(0.1 + c.windowEmissive * 0.22, 0.1, 0.5);
+    this.mats.paint.emissiveIntensity = paintGlow;
+    this.mats.paintEdge.emissiveIntensity = paintGlow * 0.85;
     this.mats.concrete.color.setScalar(lerp(0.74, 0.4, clamp(c.fogDensity / 0.003, 0, 1)));
   }
 
